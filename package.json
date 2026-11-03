@@ -1,0 +1,57 @@
+{
+  "name": "@zws/dsh-nature",
+  "version": "1.0.2",
+  "description": "Nature 论文写作套件：nature agent 预设（PTC 底子 + 24 个 nature-skills 技能）与 DSH 插件（工作台、设置页、nature-skills 增量更新中心，红点提醒）双件套。",
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zws20070309/dsh-nature.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zws20070309/dsh-nature/issues"
+  },
+  "homepage": "https://github.com/zws20070309/dsh-nature#readme",
+  "files": [
+    "lib",
+    "locale",
+    "tools",
+    "test",
+    "preset",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "agent-preset",
+    "academic-writing",
+    "nature-skills"
+  ],
+  "license": "MIT"
+}
