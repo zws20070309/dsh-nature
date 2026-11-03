@@ -52,6 +52,7 @@ A Nature-grade academic writing suite for DeepSeek Harness: one repo, two pieces
 - **设置页**：设置 → Nature 写作。改动**只落内存**，点「保存设置」才写配置（生态惯例）；「立即检查 / 更新全部」就地执行。
 - **更新语义**：远端 main 有新提交 → 与基线按 blob sha 差分 → 只有变化的子 skill 被下载覆写/删除，其余目录零改动；可勾选只更新其中一部分。
 - **红点**：侧栏图标右上角 6px 品牌色圆点（10 分钟轮询）；设置页与工作台头部横幅；插件管理器详情页「有更新」Tag。
+- **镜像源（重要）**：`raw.githubusercontent.com` 在部分网络不可达（2026-11-04 实测 `Connection was reset`），而检查用的 `api.github.com` 通常可达——表现为「检查正常、更新超时」。此时在设置页把镜像源设为前缀替换型代理（实测可用：`https://ghproxy.net/https://raw.githubusercontent.com`、`https://gh-proxy.com/https://raw.githubusercontent.com`），下载经镜像进行，**blob sha 内容校验不受镜像影响**（校验和来自 GitHub trees API，镜像只是传输通道）。留空则直连 raw。
 
 ## Security model / 安全模型
 
@@ -71,6 +72,8 @@ A Nature-grade academic writing suite for DeepSeek Harness: one repo, two pieces
 | DSH | 插件 | 说明 |
 |---|---|---|
 | 0.2.1-rc.5 | 1.0.0 | 开发与验收基线（本机实测版本） |
+| 0.2.1-rc.5 | 1.0.1 | 挂载首拍 status() 挂起时有限重试（实机验收修复） |
+| 0.2.1-rc.5 | 1.0.2 | 动作类 RPC 超时重试 + 阶段恢复；raw 被墙时配置镜像源即可完成更新（实机全流程演练通过） |
 
 装错版本会被 DSH 在启动时整体拒绝，表现为「装了但完全没有入口」。
 
