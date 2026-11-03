@@ -58,6 +58,7 @@
   "error.load": "状态加载失败：{message}",
   "error.action": "操作失败：{message}",
   "error.remoteNotMounted": "宿主服务未就绪，请重启 DSH 后重试",
+  "error.remoteTimeout": "远程通道无响应（已自动重试多次）。DSH 的插件事件流可能中断：稍后重试，或重启 DSH 后再试。",
   "badge.update": "有更新",
   "card.openDir": "打开技能目录",
   "card.settingsHint": "自动检查、目标目录与镜像源在「设置 → Nature 写作」页配置。",

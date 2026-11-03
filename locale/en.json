@@ -58,6 +58,7 @@
   "error.load": "Failed to load status: {message}",
   "error.action": "Action failed: {message}",
   "error.remoteNotMounted": "Host service is not ready; restart DSH and retry",
+  "error.remoteTimeout": "The remote channel stopped responding (retried automatically). The DSH plugin event stream may be down: retry later, or restart DSH.",
   "badge.update": "Update",
   "card.openDir": "Open skills directory",
   "card.settingsHint": "Auto-check, target directory and mirror are configured on the \"Settings → Nature Writing\" page.",
