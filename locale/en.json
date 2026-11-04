@@ -37,6 +37,8 @@
   "catalog.triggerHint": "This skill registers the trigger name {trigger} in SKILL.md (directory name differs)",
   "install.title": "Skill installation",
   "install.unknown": "Reading installation state… if this never resolves, the host service is not ready — restart DSH.",
+  "install.diagMountFailed": "Remote channel mount failed: {message}",
+  "install.diagNoNamespace": "Remote channel mounted but the namespace never appeared. Please send this line to the author.",
   "install.progress": "{have}/{total} installed",
   "install.complete": "All {n} nature skills are ready",
   "install.empty": "No nature skills detected",

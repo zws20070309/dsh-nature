@@ -1,6 +1,6 @@
 {
   "name": "@zws/dsh-nature",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Nature 论文写作套件：nature agent 预设（PTC 底子 + 24 个 nature-skills 技能）与 DSH 插件（工作台、设置页、nature-skills 增量更新中心，红点提醒）双件套。",
   "type": "module",
   "main": "lib/index.js",
