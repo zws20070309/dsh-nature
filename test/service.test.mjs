@@ -526,3 +526,116 @@ test('apply(): 启动扫描是异步的，不阻塞 fiber 建立', async () => {
     await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
 })
+
+// ── 回归（审查发现 P0）：installed 必须反映磁盘，不能反映"调度安排" ───────────────
+// 早期实现用「远端清单里有 SKILL.md」判断已装：24 个技能远端都有 SKILL.md，
+// 于是恒为 true → fatal 不可达 → 全量失败时 installed 报满、manifest 记整棵树、
+// 状态置成 upToDate，用户再也装不上。
+test('install: 全部下载失败时 installed=[] 且不写基线', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p0-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    service.fetchHeadSha = async () => 'd'.repeat(40)
+    service.fetchSkillFiles = async () => ({
+      'nature-figure/SKILL.md': 'a'.repeat(40),
+      'nature-writing/SKILL.md': 'c'.repeat(40),
+    })
+    service.downloadBlob = async () => { throw new Error('ECONNRESET') }
+
+    const res = await service.install()
+    assert.deepEqual(res.outcome.installed, [], '下载全失败时绝不能报"已安装"')
+    assert.equal(res.outcome.ok, false)
+    assert.deepEqual(res.installation.installed, [], '磁盘真相就是空的')
+    assert.equal(Object.keys(res.manifest.files).length, 0, '失败时绝不能写基线')
+    assert.equal(res.lastCheckStatus, 'error', '失败必须反映到状态，不能是 upToDate')
+    assert.ok(res.lastError, '失败必须有 lastError')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('install: 成功后 installed 与磁盘一致；部分失败要如实标记', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p0b-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    service.fetchHeadSha = async () => 'e'.repeat(40)
+    service.fetchSkillFiles = async () => ({
+      'nature-figure/SKILL.md': 'a'.repeat(40),
+      'nature-figure/extra.md': 'b'.repeat(40),
+    })
+    // SKILL.md 成功、extra.md 失败
+    service.downloadBlob = async (head, rel) => {
+      if (rel.endsWith('extra.md')) throw new Error('ECONNRESET')
+      return Buffer.from('---\nname: nature-figure\n---\n')
+    }
+    const res = await service.install()
+    assert.deepEqual(res.outcome.installed, ['nature-figure'], 'SKILL.md 落盘就算装上')
+    assert.deepEqual(res.installation.installed, ['nature-figure'], 'installed 必须与磁盘一致')
+    assert.equal(res.outcome.ok, false, '有文件失败 → ok=false')
+    assert.equal(res.outcome.reason, 'partial')
+    assert.ok(res.outcome.failures.length >= 1)
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归（审查 P2-3）：非法技能名不能静默成功 ────────────────────────────────────
+test('install: 非法技能名进 skipped，不再静默成功', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p23-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    service.fetchHeadSha = async () => 'f'.repeat(40)
+    service.fetchSkillFiles = async () => ({})
+    service.downloadBlob = async () => Buffer.from('x')
+
+    const res = await service.install(['not-a-nature-skill'])
+    assert.ok(res.outcome.skipped.includes('not-a-nature-skill'), '非法名字必须出现在 skipped 里')
+    assert.deepEqual(res.outcome.installed, [])
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归（审查 P2-7）：改 targetDir 后必须重扫 ──────────────────────────────────
+test('setConfig: 改 targetDir 后立即重扫安装状态', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p27-'))
+  try {
+    const dirA = join(home, 'skillsA')
+    const dirB = join(home, 'skillsB')
+    await mkdir(join(dirB, 'nature-figure'), { recursive: true })
+    await writeFile(join(dirB, 'nature-figure', 'SKILL.md'), '---\nname: nature-figure\n---\n')
+
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: dirA, autoCheck: false })
+    assert.equal(service.status().installation.installedCount, 0, 'A 目录是空的')
+
+    const after = await service.setConfig({ targetDir: dirB })
+    assert.equal(after.installation.installedCount, 1, '改到 B 后必须立刻看到 B 的技能')
+    assert.deepEqual(after.installation.installed, ['nature-figure'])
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})

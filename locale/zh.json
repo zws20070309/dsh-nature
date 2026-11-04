@@ -48,6 +48,7 @@
   "install.refreshAll": "全部重装 / 刷新",
   "install.installing": "安装中…",
   "install.done": "已安装 {n} 个技能",
+  "install.failed": "安装失败（{n} 个文件报错），请检查网络或镜像源后重试",
   "install.partialDone": "已安装 {done} 个技能，{failed} 个文件失败（详见日志）",
   "install.openDir": "打开技能目录",
   "install.pathHint": "安装位置：{dir}（DSH 从这里自动发现技能，装完即可在会话里触发）",

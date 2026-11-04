@@ -48,6 +48,7 @@
   "install.refreshAll": "Reinstall / refresh all",
   "install.installing": "Installing…",
   "install.done": "Installed {n} skills",
+  "install.failed": "Install failed ({n} files errored); check the network or mirror and retry",
   "install.partialDone": "Installed {done} skills, {failed} files failed (see logs)",
   "install.openDir": "Open skills directory",
   "install.pathHint": "Installed into {dir} — DSH discovers skills from there, so they are usable as soon as the run finishes",
