@@ -1,12 +1,8 @@
 {
-  "meta": {
-    "title": "Nature 论文写作",
-    "description": "Nature 论文写作套件：nature agent 预设（PTC 底子 + 24 个 nature-skills 技能）与 DSH 插件（工作台、设置页、nature-skills 增量更新中心，红点提醒）双件套。"
-  },
   "nav": "Nature 写作",
-  "banner.update": "nature-skills 有可用更新",
-  "banner.notInstalled": "未检测到 nature 技能 —— 打开「Nature 写作」工作台可一键安装全套",
-  "banner.partialInstalled": "检测到部分 nature 技能（{have}/{total}，缺 {miss} 个）—— 可在工作台自动补全",
+  "banner.update": "技能有可用更新",
+  "banner.notInstalled": "未检测到技能 —— 打开「Nature 写作」工作台可一键安装全套",
+  "banner.partialInstalled": "检测到部分技能（{have}/{total}，缺 {miss} 个）—— 可在工作台自动补全",
   "banner.needsBaseline": "尚未建立技能基线：请先在 nature-skills 克隆目录运行 tools/baseline.cjs，再回到这里点「检查更新」",
   "banner.error": "状态获取失败：{message}",
   "status.pluginVersion": "插件版本",
@@ -33,17 +29,17 @@
   "updates.resultPartial": "已更新 {done} 个技能，{failed} 个文件失败（详见日志）",
   "catalog.title": "技能目录",
   "catalog.count": "共 {n} 项",
-  "catalog.hint": "24 个技能随 nature-skills 仓库增量更新；在会话里直接描述任务即可触发对应技能。",
+  "catalog.hint": "以上技能来自 nature-skills 与 anti-defensive-writing 两个上游仓库，统一增量更新；在会话里直接描述任务即可触发对应技能。",
   "catalog.triggerHint": "该技能在 SKILL.md 里登记的触发名是 {trigger}（目录名与触发名不同）",
   "install.title": "技能安装状态",
   "install.unknown": "正在读取安装状态…如果一直停在这里，说明宿主服务未就绪，重启 DSH 即可。",
   "install.diagMountFailed": "远程通道挂载失败：{message}",
   "install.diagNoNamespace": "远程通道已挂载，但命名空间未出现。请把这一行发给作者。",
   "install.progress": "{have}/{total} 已安装",
-  "install.complete": "全套 {n} 个 nature 技能已就绪",
-  "install.empty": "未检测到 nature 技能",
-  "install.emptyHint": "当前目录下没有任何 nature 技能，预设里的写作/文献/统计/绘图链路都无法触发。点下方按钮安装全套。",
-  "install.partialShort": "检测到部分 nature 技能：已有 {have}/{total}，还缺 {miss} 个",
+  "install.complete": "全套 {n} 个技能已就绪",
+  "install.empty": "未检测到技能",
+  "install.emptyHint": "当前目录下没有任何技能，预设里的写作/文献/统计/绘图链路都无法触发。点下方按钮安装全套。",
+  "install.partialShort": "检测到部分技能：已有 {have}/{total}，还缺 {miss} 个",
   "install.partialHint": "可以只补装缺失的 {n} 个；已安装的技能保持原样。「全部重装」会按远端最新版刷新每一个。",
   "install.installAll": "安装全套 nature 技能",
   "install.fillMissing": "自动补全缺失的 {n} 个",
@@ -110,5 +106,14 @@
   "skill.nature-paper-to-patent": "论文→中国发明专利草稿/技术交底书（证据锚定 + DOCX 打包）",
   "skill.nature-reviewer": "模拟 3 份互盲审稿报告 + 1 份综合，含法证一致性审计",
   "skill.nature-response": "返修邮件解析→逐点回复/cover letter/标红稿/LaTeX 返修包一致性",
-  "skill.nature-shared": "禁止独立调用的共享参考库：写作公理、语料规则、期刊格式、一致性扫描"
+  "skill.nature-shared": "禁止独立调用的共享参考库：写作公理、语料规则、期刊格式、一致性扫描",
+  "group.defense": "反防御性写作",
+  "skill.anti-defensive-writing": "阻止论文的防御性写作（中文）：把论文当学术发布会，不主动示弱、不写实验流水账、不替审稿人攻击自己",
+  "skill.anti-defensive-writing-en": "Anti-defensive writing (English): the press-release principle — never volunteer weakness, never write an experiment diary, never attack the paper on the reviewer's behalf",
+  "sources.skillCount": "{n} 个技能",
+  "sources.failed": "以下技能源拉取失败（该源的技能未参与本次检查）：{detail}",
+  "meta": {
+    "title": "Nature 论文写作",
+    "description": "Nature 论文写作套件：nature agent 预设（PTC 底子 + 24 个 nature-skills 技能）与 DSH 插件（工作台、设置页、nature-skills 增量更新中心，红点提醒）双件套。"
+  }
 }
