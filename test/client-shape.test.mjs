@@ -117,12 +117,12 @@ test('apply: 字典双语注册且键集一致', () => {
   assert.equal(dict.en.nav, 'Nature Writing')
 })
 
-test('apply: 5 个 strict descriptor（direct / json / wire=name）', () => {
+test('apply: 7 个 strict descriptor（direct / json / wire=name）', () => {
   assert.equal(mounted.length, 1, '$mount called once')
   assert.equal(contribution.package, '@zws/dsh-nature')
   assert.deepEqual(
     plain(contribution.descriptors.map((d) => d.method)),
-    ['status', 'check', 'update', 'setConfig', 'openSkillsDir'],
+    ['status', 'inspect', 'check', 'update', 'install', 'setConfig', 'openSkillsDir'],
   )
   for (const descriptor of contribution.descriptors) {
     assert.equal(descriptor.service, 'dshNature', descriptor.method)
@@ -141,7 +141,7 @@ test('descriptor 参数形状与 strict codec 真的能校验', () => {
   const byMethod = Object.fromEntries(contribution.descriptors.map((d) => [d.method, d]))
   assert.deepEqual(plain(byMethod.update.parameters.map((p) => p.wire)), ['skillNames'])
   assert.deepEqual(plain(byMethod.setConfig.parameters.map((p) => p.wire)), ['patch'])
-  for (const method of ['status', 'check', 'openSkillsDir']) {
+  for (const method of ['status', 'inspect', 'check', 'openSkillsDir']) {
     assert.deepEqual(plain(byMethod[method].parameters), [], method + ' 不带参数')
   }
 
@@ -225,12 +225,7 @@ test('catalog: 24 个技能、skill.* 文案与目录一一对应', () => {
 // ── statusView：对宿主真实形状（lib/index.js:498-511）的归一化 ───────────────────
 test('statusView: 宿主状态形状归一化（baseline/needsBaseline/lastError）', async () => {
   // statusView 不在 exports 上，经渲染 WorkbenchPanel 不现实；直接从源码取函数做单元调用。
-  const fnMatch = /function statusView\(raw\) \{([\s\S]*?)\n    \}/.exec(source)
-  assert.ok(fnMatch, 'statusView 找不到')
-  const statusView = new Function(
-    'PLUGIN_VERSION',
-    fnMatch[0].replace('function statusView(raw) {', 'return function statusView(raw) {'),
-  )(pkg.version)
+  const statusView = buildStatusView()
   // 宿主首装形状：没清单、没检查过。
   const fresh = statusView({
     version: 1, headSha: null, lastCheckedAt: null, lastCheckStatus: 'never', lastError: null,
@@ -288,12 +283,7 @@ test('滚动：main 槽面板自带 height:100% + overflow-y:auto 的滚动容�
 // {ok,headSha,updated,...} 这种明细形状，statusView 会归一化成"未建立基线 +
 // 目标目录为空"，一次更新就把页面显示成坏状态。
 test('statusView: 能识别 update 明细并按 outcome 带出', () => {
-  const fnMatch = /function statusView\(raw\) \{([\s\S]*?)\n    \}/.exec(source)
-  assert.ok(fnMatch, 'statusView 找不到')
-  const statusView = new Function(
-    'PLUGIN_VERSION',
-    fnMatch[0].replace('function statusView(raw) {', 'return function statusView(raw) {'),
-  )(pkg.version)
+  const statusView = buildStatusView()
 
   const full = {
     version: 1, headSha: 'a'.repeat(40), lastCheckedAt: '2026-11-04T01:00:00.000Z',
@@ -361,3 +351,59 @@ test('apply: 样式、文案、Remote 挂载三段各自兜底，$mount 失败�
     '$mount 失败后五个槽位仍必须全部注册（UI 要给 remoteNotMounted 的可读提示）',
   )
 })
+
+// statusView 现在依赖 installationView 与 CATALOG_TOTAL，必须一起求值：
+// 只抽 statusView 一个函数体会在 new Function 里 ReferenceError。
+function buildStatusView() {
+  const pick = (re, label) => {
+    const m = re.exec(source)
+    assert.ok(m, '找不到：' + label)
+    return m[0]
+  }
+  const installationView = pick(/function installationView\(raw\) \{[\s\S]*?\n    \}/, 'installationView')
+  const statusView = pick(/function statusView\(raw\) \{[\s\S]*?\n    \}/, 'statusView')
+  const catalogMatch = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(source)
+  assert.ok(catalogMatch, 'CATALOG 找不到')
+  const total = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].length
+  const body = installationView + '\n' +
+    statusView.replace('function statusView(raw) {', 'return function statusView(raw) {')
+  return new Function('PLUGIN_VERSION', 'CATALOG_TOTAL', body)(pkg.version, total)
+}
+
+// ── 回归：拿不到宿主状态时，绝不能把"读不到"渲染成"0 个已安装" ──────────────────
+// 实机踩到：升级后宿主未重启（旧代码没有 inspect 方法），面板显示
+// 「未检测到 nature 技能 / 0 个已安装」，而本机明明装了 24 个 —— 用户会去重装。
+test('installationView: 无宿主状态时 known=false，不误报成"未安装"', () => {
+  const installationView = buildInstallationView()
+
+  const unknown = installationView(undefined)
+  assert.equal(unknown.known, false, 'undefined 必须被判为未知')
+  assert.equal(unknown.empty, false, '未知 ≠ 空（否则页面会说"未检测到技能"）')
+  assert.equal(unknown.complete, false)
+
+  // null / 形状不对 也走未知分支
+  assert.equal(installationView(null).known, false)
+  assert.equal(installationView({}).known, false, '没有 installed 数组就是未知')
+  assert.equal(installationView({ complete: true }).known, false, '只有 complete 不算数')
+
+  // 真实形状才是已知
+  const empty = installationView({ installed: [], missing: ['a'], complete: false })
+  assert.equal(empty.known, true)
+  assert.equal(empty.empty, true)
+  assert.equal(empty.installedCount, 0)
+
+  const partial = installationView({ installed: ['nature-figure'], missing: ['nature-writing'], complete: false })
+  assert.equal(partial.known, true)
+  assert.equal(partial.partial, true)
+  assert.equal(partial.installedCount, 1)
+  assert.equal(partial.empty, false)
+})
+
+function buildInstallationView() {
+  const m = /function installationView\(raw\) \{[\s\S]*?\n    \}/.exec(source)
+  assert.ok(m, 'installationView 找不到')
+  const catalogMatch = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(source)
+  const total = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].length
+  return new Function('CATALOG_TOTAL',
+    m[0].replace('function installationView(raw) {', 'return function installationView(raw) {'))(total)
+}

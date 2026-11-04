@@ -142,3 +142,60 @@ DSH 的技能名取 SKILL.md 的 frontmatter `name`（`dsh-skill-filesystem` 的
 此前 `$mount` 抛错会让整个 client bundle 挂掉（与官方 bundle 拼在同一脚本里），
 表现为「插件装了但完全没有入口」。现在 `$mount` 失败仍注册五个槽位，面板走
 `remoteNotMounted` 分支给可读提示。另有回归测试覆盖该失败路径。
+
+
+## 7. 1.0.4：安装检测与补全（新增能力）
+
+### 7.1 为什么需要"检测"
+
+原插件只做**增量更新**：它假设技能已经在本地（用户跑过 `tools/baseline.cjs`）。
+新用户装完插件打开工作台，看到的是"未建立基线"——没有任何一键入口，
+而"检查更新/更新中心"在没有技能时**根本没有操作对象**。这是首装体验的断点。
+
+### 7.2 三态检测（scanInstallation）
+
+判定口径：**目录内有 SKILL.md 才算装上**。
+只看目录存在会把半路中断的下载（空目录、半截文件）算成已装，用户看到"已完成"
+却发现技能调不起来——DSH 的 `discoverRoot` 同样会跳过没有 SKILL.md 的目录
+（`dsh-skill-filesystem/lib/index.js`：`locator = entry.type === 'directory' ? { path: join(entry.path,'SKILL.md') } : ...`）。
+
+返回 `{ installed, missing, complete, total, installedCount, empty, partial }`，
+宿主与浏览器半用同一套派生字段（客户端仍会重新派生，因为它不能信任宿主形状）。
+
+### 7.3 install() 与 update() 的分工
+
+| | install(skillNames?) | update(skillNames?) |
+|---|---|---|
+| 前提 | **不需要基线**（首装路径） | 需要 manifest 基线，无基线直接返回 baseline-missing |
+| 语义 | 确保点名的（或全套）技能**到最新** | 只同步**与基线有差异**的技能 |
+| 基线 | 按 `installation.installed` 裁剪后写入 | 同左（都是 `baselineFor`） |
+| 用途 | 首次安装 / 部分补全 / 全部重装 | 日常增量更新 |
+
+**基线口径（关键，踩过坑）**：基线必须只记**磁盘上真实存在的 skill**。
+早期实现直接写整棵远端树（`remoteFiles`），后果是 `install(['nature-figure'])`
+之后 manifest 里记了全部 24 个，于是 `update()` 的 diff 认为另外 23 个"已是最新"，
+**它们永远装不上**（2026-11-04 实测：manifest 3 条、update 报 changedSkills=[]）。
+现在统一走 `baselineFor(remoteFiles)`：以 `installation.installed` 为白名单过滤。
+
+### 7.4 并发下载（性能）
+
+814 个文件逐个串行实测 **8 分钟只完成 1/24 个技能**，用户会以为卡死。
+改为 `mapPool` 有界并发：skill 间并发 2、skill 内并发 6，配合指数退避
+（500→1000→2000ms）+ 重试 4 次。实测 **92 秒完成 24/24**（814 文件，0 失败）。
+
+并发只改编排顺序，每个文件仍是「下载 → git blob sha 校验 → tmp+rename 原子写」，
+不放松任何校验。镜像站在高并发下会回 503，退回线性退避时实测有 8 个文件失败，
+退避改成指数后同一批 0 失败。
+
+### 7.5 误报修复（known 标志）
+
+升级插件后宿主未重启（旧代码没有 `inspect` 方法）时，面板显示
+「未检测到 nature 技能 / 0 个已安装」，而本机装了 24 个 —— 用户会去重装。
+`installationView` 增加 `known` 标志：拿不到宿主状态时显示「正在读取安装状态…」
+而不是「0/24」，且此时**不渲染安装按钮**（点了会打到未注册的方法上）。
+
+### 7.6 persona 改为全英文
+
+原人格中英混排。预设注入应与官方 `ptc` 同语言（英文）。改为纯英文后：
+3615 字符、0 个中文字符（脚本校验），路由规则/语言策略/铁律全部保留。
+中文只保留在技能目录文案与用户可见 UI，不进提示词。

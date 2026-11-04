@@ -200,6 +200,442 @@ test('update(): 没有基线时也回完整状态形状，明细在 outcome 里'
     const state = JSON.parse(await readFile(join(home, 'dsh-nature-state.json'), 'utf8'))
     assert.equal(state.lastCheckStatus, 'baseline-missing')
   } finally {
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 安装检测：三态（全无 / 部分 / 完整）必须反映磁盘真相 ─────────────────────────
+// 判定口径是"目录里有 SKILL.md"（DSH 的 discoverRoot 会跳过没有 SKILL.md 的目录），
+// 不是"目录存在"——只看目录会把半路中断的下载算成已装。
+test('scanInstallation: 全无 / 部分 / 完整三态', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const root = await mkdtemp(join(tmpdir(), 'dsh-nature-scan-'))
+  try {
+    // 空目录 → 全缺
+    const empty = await mod.scanInstallation(root)
+    assert.equal(empty.complete, false)
+    assert.equal(empty.installed.length, 0)
+    assert.equal(empty.missing.length, mod.NATURE_SKILLS.length)
+
+    // 只装 nature-figure → 部分，且 missing 里没有它
+    await mkdir(join(root, 'nature-figure'), { recursive: true })
+    await writeFile(join(root, 'nature-figure', 'SKILL.md'), '---\nname: nature-figure\n---\n')
+    const partial = await mod.scanInstallation(root)
+    assert.equal(partial.complete, false)
+    assert.deepEqual(partial.installed, ['nature-figure'])
+    assert.ok(partial.missing.includes('nature-writing'))
+    assert.ok(!partial.missing.includes('nature-figure'))
+
+    // 目录在但没有 SKILL.md → 仍算缺失（半截下载不能报成已装）
+    await mkdir(join(root, 'nature-writing'), { recursive: true })
+    await writeFile(join(root, 'nature-writing', 'notes.txt'), 'x')
+    const noEntry = await mod.scanInstallation(root)
+    assert.ok(noEntry.missing.includes('nature-writing'), '没有 SKILL.md 不算装上')
+    assert.deepEqual(noEntry.installed, ['nature-figure'])
+
+    // 补齐全套 → complete
+    for (const name of mod.NATURE_SKILLS) {
+      await mkdir(join(root, name), { recursive: true })
+      await writeFile(join(root, name, 'SKILL.md'), '---\nname: ' + name + '\n---\n')
+    }
+    const full = await mod.scanInstallation(root)
+    assert.equal(full.complete, true)
+    assert.equal(full.installed.length, mod.NATURE_SKILLS.length)
+    assert.deepEqual(full.missing, [])
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('scanInstallation: 目标目录不存在时是"全缺"而不是抛错', async () => {
+  const mod = await import('../lib/index.js')
+  const result = await mod.scanInstallation(join(process.env.TEMP ?? '/tmp', 'definitely-not-here-' + Date.now()))
+  assert.equal(result.complete, false)
+  assert.equal(result.installed.length, 0)
+  assert.equal(result.missing.length, mod.NATURE_SKILLS.length)
+})
+
+// ── 技能名清单是单一事实源：host 与 client 目录必须逐项一致 ──────────────────────
+test('NATURE_SKILLS 与 client 的 CATALOG 逐项一致（24 项、同名同序）', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const mod = await import('../lib/index.js')
+  const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const catalog = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(clientSource)
+  assert.ok(catalog, 'client 的 CATALOG 找不到')
+  const clientNames = [...catalog[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].map((m) => m[1])
+  assert.equal(mod.NATURE_SKILLS.length, 24)
+  assert.deepEqual(clientNames, mod.NATURE_SKILLS, 'host NATURE_SKILLS 与 client CATALOG 必须同集同序')
+})
+
+// ── install()：无基线也能装（这是首装路径，update() 会拒绝）──────────────────────
+test('install(): 无基线时仍能走完并回完整状态 + outcome', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-install-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    // 用假远端把网络摘掉：只验证"契约 + 落盘 + 重扫"这条本地链路。
+    service.fetchHeadSha = async () => 'a'.repeat(40)
+    service.fetchSkillFiles = async () => ({
+      'nature-figure/SKILL.md': 'f74ffae6423160998b5983402eb627a5ba735fc7',
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: nature-figure\n---\n')
+
+    const result = await service.install()
+    // 返回形状必须与 status() 同形（浏览器半直接拿它覆盖状态）
+    for (const key of ['version', 'lastCheckStatus', 'changedSkills', 'manifest', 'config', 'installation']) {
+      assert.ok(Object.hasOwn(result, key), 'install() 结果缺字段 ' + key)
+    }
+    assert.ok(result.outcome && typeof result.outcome === 'object', '明细必须在 outcome 里')
+    assert.deepEqual(result.outcome.installed, ['nature-figure'], '远端只有这一个 → 只装它')
+    // 关键：install 之后必须真的可被发现（安装快照重扫过）
+    assert.deepEqual(result.installation.installed, ['nature-figure'])
+    assert.equal(result.installation.complete, false)
+    // 基线被快进（否则用户永远停在"未建立基线"）
+    assert.equal(result.manifest.headSha, 'a'.repeat(40))
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('install(skillNames): 点名只装指定的，其余不碰', async () => {
+  const { mkdtemp, rm, readdir } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-install2-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+    service.fetchHeadSha = async () => 'b'.repeat(40)
+    service.fetchSkillFiles = async () => ({
+      'nature-figure/SKILL.md': 'x'.repeat(40),
+      'nature-writing/SKILL.md': 'y'.repeat(40),
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+
+    const result = await service.install(['nature-figure'])
+    assert.deepEqual(result.outcome.installed, ['nature-figure'])
+    const dirs = await readdir(skills)
+    assert.deepEqual(dirs, ['nature-figure'], '没点名的 skill 不该被创建')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 并发下载：必须真的并发，且单个失败不中断整批 ────────────────────────────────
+// 814 个文件串行要十几分钟（实测 8 分钟只完成 1/24 个技能），用户会以为卡死。
+// 这里用"同时在飞的最大任务数"直接证明并发生效，而不是只看耗时（耗时在 CI 上不稳）。
+test('instal 并发：同时在飞的任务数达到上限，且单文件失败不影响其它文件', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-pool-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    // 造 40 个文件 + 入口 SKILL.md，其中 1 个非入口文件故意失败。
+    // 入口必须在：SKILL.md 是 DSH 发现技能的前提，它缺了才该判定安装失败。
+    const files = {}
+    files['nature-figure/SKILL.md'] = 'a'.repeat(40)
+    for (let i = 0; i < 40; i++) files['nature-figure/f' + i + '.md'] = 'a'.repeat(40)
+    service.fetchHeadSha = async () => 'c'.repeat(40)
+    service.fetchSkillFiles = async () => files
+
+    let inFlight = 0
+    let peak = 0
+    service.downloadBlob = async (head, rel) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setTimeout(r, 5))
+      inFlight -= 1
+      if (rel.endsWith('f7.md')) throw new Error('synthetic failure')
+      return Buffer.from('---\nname: nature-figure\n---\n')
+    }
+
+    const result = await service.install(['nature-figure'])
+    assert.ok(peak > 1, '并发未生效：峰值同时在飞 ' + peak + '（应 > 1）')
+    assert.ok(peak <= 6, '并发超过上限：峰值 ' + peak + '（上限是 6）')
+    assert.equal(result.outcome.failures.length, 1, '单文件失败要如实记录')
+    assert.deepEqual(result.outcome.installed, ['nature-figure'], '单文件失败不该拦掉整个 skill')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 安装快照的派生字段：宿主直读方也不能拿到 undefined ──────────────────────────
+test('installation 快照自带派生字段（total/installedCount/empty/partial）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-shape-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    // 必须显式指向空的临时目录：默认 targetDir 指向本机 ~/.agents/skills，
+    // 那里通常已经装满 24 个技能，测"空目录"会得到相反的结论。
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    const s = await service.inspect()
+    const inst = s.installation
+    for (const key of ['installed', 'missing', 'complete', 'total', 'installedCount', 'empty', 'partial']) {
+      assert.ok(Object.hasOwn(inst, key), '安装快照缺字段 ' + key)
+    }
+    assert.equal(inst.total, mod.NATURE_SKILLS.length)
+    assert.equal(inst.installedCount, inst.installed.length)
+    assert.equal(inst.empty, inst.installed.length === 0)
+    assert.equal(inst.complete, false, '空目录不能报 complete')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归：基线只能记"真正落盘的 skill" ──────────────────────────────────────────
+// 实机踩到（P1）：install(['nature-figure']) 之后 manifest 里记了整棵远端树的 3 条，
+// 于是 update() 的 diff 认为另外 2 个 skill "已是最新"，它们永远装不上。
+// 根因是更新基线时直接写了 remoteFiles。修法：按 installation.installed 裁剪。
+test('基线只记已装 skill：install 部分技能后 update 仍能把缺的补上', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-baseline-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    const remote = {
+      'nature-figure/SKILL.md': 'a'.repeat(40),
+      'nature-writing/SKILL.md': 'b'.repeat(40),
+      'nature-data/SKILL.md': 'c'.repeat(40),
+    }
+    service.fetchHeadSha = async () => 'd'.repeat(40)
+    service.fetchSkillFiles = async () => remote
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+
+    // 只装 1 个
+    const first = await service.install(['nature-figure'])
+    assert.deepEqual(first.installation.installed, ['nature-figure'])
+    // 基线必须只有已装的那一个，绝不能把没装的也记进去
+    const baseline = Object.keys(first.manifest.files)
+    assert.equal(baseline.length, 1, '基线里混入了未安装的 skill：' + baseline.join(','))
+    assert.ok(baseline[0].startsWith('nature-figure/'))
+
+    // 关键：此时 update() 应该能看见还缺的，并把它们装上。
+    // 注意 complete 的定义是「24 个全套齐全」，这组夹具只有 3 个技能，
+    // 所以绝不能断言 complete=true —— 要断言的是"缺的被补上了"。
+    const second = await service.update()
+    assert.deepEqual([...second.installation.installed].sort(), ['nature-data', 'nature-figure', 'nature-writing'],
+      'update() 应把远端有、本地没有的 skill 补上')
+    assert.deepEqual([...second.outcome.updated].sort(), ['nature-data', 'nature-writing'])
+    assert.equal(second.installation.complete, false, '只有 3/24 不可能是 complete')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('baselineFor: 未装任何技能时给空基线（不是整棵远端树）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-bf-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    await service.refreshInstallation()
+    const out = service.baselineFor({ 'nature-figure/SKILL.md': 'a'.repeat(40) })
+    assert.deepEqual(out, {}, '一个都没装时基线必须是空的')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归：首屏必须反映磁盘真相，不能读旧快照 ────────────────────────────────────
+// 实机踩到（P1）：状态文件里没有 installation，但磁盘上确实装了技能；
+// 面板挂载首屏只调 status() 就拿到 0 个已安装 → 误报「未检测到 nature 技能」。
+// 修法：① apply() 启动后异步扫一次；② 客户端挂载首帧改调 inspect()（先扫再回）。
+test('首屏检测：磁盘有技能时 inspect() 立即给出正确结论（不等启动扫描）', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-first-'))
+  const skills = join(home, 'skills')
+  try {
+    // 磁盘上先放一个技能，state 文件里没有任何 installation
+    await mkdir(join(skills, 'nature-figure'), { recursive: true })
+    await writeFile(join(skills, 'nature-figure', 'SKILL.md'), '---\nname: nature-figure\n---\n')
+    await writeFile(join(home, 'dsh-nature-state.json'), JSON.stringify({
+      version: 1,
+      config: { autoCheck: false, intervalHours: 6, targetDir: skills, mirror: '' },
+      manifest: { headSha: null, files: {} }, changedSkills: [], updateAvailable: false,
+      lastCheckStatus: 'never', lastCheckedAt: null, lastError: null, headSha: null,
+    }))
+
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+
+    // 面板挂载首帧调的就是 inspect()：它必须先扫磁盘再回状态
+    const first = await service.inspect()
+    assert.equal(first.installation.installedCount, 1, '首屏必须看见磁盘上已有的技能')
+    assert.deepEqual(first.installation.installed, ['nature-figure'])
+    assert.equal(first.installation.partial, true, '1/24 属于部分安装')
+    assert.equal(first.installation.complete, false)
+    // 等启动扫描彻底落定再清理：否则 rm 会与它的 persist 撞上 ENOTEMPTY。
+    // 这是测试清理的时序问题，不是被测代码的行为（prod 里没人删 home）。
+    await new Promise((r) => setTimeout(r, 150))
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('apply(): 启动扫描是异步的，不阻塞 fiber 建立', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-boot-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    // apply 必须同步返回（不 await 磁盘扫描），否则 DSH 启动会被磁盘 IO 卡住
+    const returned = mod.apply(ctx, { dshHome: home })
+    assert.equal(returned, undefined, 'apply 应同步完成')
+    assert.ok(service, 'provide 必须已发生')
+    // 稍等让后台扫描跑完，确认它不会抛错
+    await new Promise((r) => setTimeout(r, 100))
+    const st = service.status()
+    assert.ok(st.installation, '后台扫描后状态里应有 installation')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归（审查发现 P0）：installed 必须反映磁盘，不能反映"调度安排" ───────────────
+// 早期实现用「远端清单里有 SKILL.md」判断已装：24 个技能远端都有 SKILL.md，
+// 于是恒为 true → fatal 不可达 → 全量失败时 installed 报满、manifest 记整棵树、
+// 状态置成 upToDate，用户再也装不上。
+test('install: 全部下载失败时 installed=[] 且不写基线', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p0-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    service.fetchHeadSha = async () => 'd'.repeat(40)
+    service.fetchSkillFiles = async () => ({
+      'nature-figure/SKILL.md': 'a'.repeat(40),
+      'nature-writing/SKILL.md': 'c'.repeat(40),
+    })
+    service.downloadBlob = async () => { throw new Error('ECONNRESET') }
+
+    const res = await service.install()
+    assert.deepEqual(res.outcome.installed, [], '下载全失败时绝不能报"已安装"')
+    assert.equal(res.outcome.ok, false)
+    assert.deepEqual(res.installation.installed, [], '磁盘真相就是空的')
+    assert.equal(Object.keys(res.manifest.files).length, 0, '失败时绝不能写基线')
+    assert.equal(res.lastCheckStatus, 'error', '失败必须反映到状态，不能是 upToDate')
+    assert.ok(res.lastError, '失败必须有 lastError')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('install: 成功后 installed 与磁盘一致；部分失败要如实标记', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p0b-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    service.fetchHeadSha = async () => 'e'.repeat(40)
+    service.fetchSkillFiles = async () => ({
+      'nature-figure/SKILL.md': 'a'.repeat(40),
+      'nature-figure/extra.md': 'b'.repeat(40),
+    })
+    // SKILL.md 成功、extra.md 失败
+    service.downloadBlob = async (head, rel) => {
+      if (rel.endsWith('extra.md')) throw new Error('ECONNRESET')
+      return Buffer.from('---\nname: nature-figure\n---\n')
+    }
+    const res = await service.install()
+    assert.deepEqual(res.outcome.installed, ['nature-figure'], 'SKILL.md 落盘就算装上')
+    assert.deepEqual(res.installation.installed, ['nature-figure'], 'installed 必须与磁盘一致')
+    assert.equal(res.outcome.ok, false, '有文件失败 → ok=false')
+    assert.equal(res.outcome.reason, 'partial')
+    assert.ok(res.outcome.failures.length >= 1)
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归（审查 P2-3）：非法技能名不能静默成功 ────────────────────────────────────
+test('install: 非法技能名进 skipped，不再静默成功', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p23-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    service.fetchHeadSha = async () => 'f'.repeat(40)
+    service.fetchSkillFiles = async () => ({})
+    service.downloadBlob = async () => Buffer.from('x')
+
+    const res = await service.install(['not-a-nature-skill'])
+    assert.ok(res.outcome.skipped.includes('not-a-nature-skill'), '非法名字必须出现在 skipped 里')
+    assert.deepEqual(res.outcome.installed, [])
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归（审查 P2-7）：改 targetDir 后必须重扫 ──────────────────────────────────
+test('setConfig: 改 targetDir 后立即重扫安装状态', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-p27-'))
+  try {
+    const dirA = join(home, 'skillsA')
+    const dirB = join(home, 'skillsB')
+    await mkdir(join(dirB, 'nature-figure'), { recursive: true })
+    await writeFile(join(dirB, 'nature-figure', 'SKILL.md'), '---\nname: nature-figure\n---\n')
+
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: dirA, autoCheck: false })
+    assert.equal(service.status().installation.installedCount, 0, 'A 目录是空的')
+
+    const after = await service.setConfig({ targetDir: dirB })
+    assert.equal(after.installation.installedCount, 1, '改到 B 后必须立刻看到 B 的技能')
+    assert.deepEqual(after.installation.installed, ['nature-figure'])
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
 })
