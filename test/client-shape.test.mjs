@@ -122,7 +122,7 @@ test('apply: 7 个 strict descriptor（direct / json / wire=name）', () => {
   assert.equal(contribution.package, '@zws/dsh-nature')
   assert.deepEqual(
     plain(contribution.descriptors.map((d) => d.method)),
-    ['status', 'inspect', 'check', 'update', 'install', 'setConfig', 'openSkillsDir'],
+    ['status', 'inspect', 'check', 'update', 'installSkills', 'setConfig', 'openSkillsDir'],
   )
   for (const descriptor of contribution.descriptors) {
     assert.equal(descriptor.service, 'dshNature', descriptor.method)
@@ -407,3 +407,111 @@ function buildInstallationView() {
   return new Function('CATALOG_TOTAL',
     m[0].replace('function installationView(raw) {', 'return function installationView(raw) {'))(total)
 }
+
+// ── 回归：namespaceApi 必须真的返回命名空间 ─────────────────────────────────────
+// 实机踩到（P0）：编辑时把 namespaceApi 的 `return namespace` 弄丢了，
+// 函数变成"只抛错不返回"，api() 永远拿到 undefined —— 于是所有远程调用都失败，
+// 面板显示「宿主服务未就绪」，重启无数次都没用（宿主半其实是好的）。
+// 现有测试全是源码正则断言，抓不到"少一个 return"这种逻辑错误，所以这里真跑。
+test('namespaceApi: api() 必须返回命名空间对象，而不是 undefined', async () => {
+  const vm = await import('node:vm')
+  let reg
+  const sandbox = { window: { __ModuleLoader__: { load(value) { reg = value } } }, console }
+  vm.createContext(sandbox)
+  vm.runInContext(source, sandbox)
+
+  const ReactStub = {
+    createElement: () => null,
+    useCallback: (fn) => fn,
+    useEffect() {},
+    useRef: (init) => ({ current: init }),
+    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+  }
+
+  const namespace = { status: async () => ({ ok: true, value: {} }) }
+  const seen = []
+  const slots = {
+    // 真实调用链：ctx.slots.inject(owner, () => ctx.slots.register({...inject: injectApi}, Comp))
+    // 先跑 factory() 触发 register，拿注册项上的 inject 工厂，再调用它 —— 等价于框架挂载那一刻。
+    inject(owner, factory) {
+      try { factory() } catch { /* register 已捕获 options，下面统一断言 */ }
+      return () => {}
+    },
+    register(options) {
+      if (options && typeof options.inject === 'function') {
+        try {
+          const injected = options.inject()
+          if (injected && typeof injected.api === 'function') seen.push(injected.api)
+        } catch { /* 抓不到就交给下面的断言报错 */ }
+      }
+      return () => {}
+    },
+  };
+
+  await reg.factory(() => ReactStub).apply({
+    effect(fn) { try { return fn() } catch { return () => {} } },
+    get(key) { return key === 'remote.dshNature' ? namespace : undefined },
+    locale: { register() { return () => {} }, bind() { return (key) => key } },
+    remote: { async $mount() {} },
+    slots,
+  })
+
+  assert.ok(seen.length > 0, '没有捕获到任何槽位的 api 工厂')
+  for (const api of seen) {
+    const resolved = api()
+    assert.notEqual(resolved, undefined, 'api() 返回了 undefined —— namespaceApi 丢了 return')
+    assert.equal(resolved, namespace, 'api() 必须返回 ctx.get("remote.dshNature") 的结果')
+  }
+})
+
+// ── 回归：Remote 方法名不能撞 gateway 的命名空间服务 ─────────────────────────────
+// 实机踩到（P0，插件完全不可用）：把安装方法命名成 install，而 gateway 的
+// RemoteNamespaceService（客户端为每个命名空间建的 Service 实例）原型上就有
+// install()，于是 validateContribution 抛
+//   client api: method "dshNature/install" conflicts with its namespace service
+// 整个命名空间挂不上 —— 表现为「宿主服务未就绪」，宿主其实是好的。
+//
+// 这里把 gateway 的保留名表抄成常量，逐个校验我们注册的方法名。
+// 表来源：dsh-api-gateway/lib/client.browser.js 的 RemoteNamespaceService
+// 原型成员 + REMOTE_NAMESPACE_FIELDS。
+test('descriptor 方法名不撞 gateway 的 RemoteNamespaceService 保留名', () => {
+  const RESERVED_PROTOTYPE = [
+    'assertMethodAvailable', 'constructor', 'empty', 'has',
+    'install', 'installDirect', 'installScoped', 'remove',
+  ]
+  const RESERVED_FIELDS = ['ctx', 'empty', 'invokeRemote', 'methods', 'name', 'namespace']
+  const reserved = new Set([...RESERVED_PROTOTYPE, ...RESERVED_FIELDS])
+
+  for (const descriptor of contribution.descriptors) {
+    assert.equal(
+      reserved.has(descriptor.method), false,
+      'Remote 方法 ' + JSON.stringify(descriptor.method) + ' 撞上 gateway 命名空间服务的保留名，' +
+      '整个命名空间会挂不上（表现为「宿主服务未就绪」）。换一个名字。',
+    )
+  }
+  // 列表本身也要守：以后有人照抄官方插件把 install 加回来，这条会立刻红。
+  assert.deepEqual(
+    plain(contribution.descriptors.map((d) => d.method)),
+    ['status', 'inspect', 'check', 'update', 'installSkills', 'setConfig', 'openSkillsDir'],
+  )
+})
+
+// ── 回归：保留名自查函数真的会抛错 ──────────────────────────────────────────────
+test('assertRemoteMethodName: 撞保留名立刻抛错，合法名放行', () => {
+  const m = /function assertRemoteMethodName\(method\) \{([\s\S]*?)\n    \}/.exec(source)
+  assert.ok(m, 'assertRemoteMethodName 找不到')
+  const setMatch = /const RESERVED_REMOTE_NAMES = new Set\(\[([\s\S]*?)\n    \]\)/.exec(source)
+  assert.ok(setMatch, 'RESERVED_REMOTE_NAMES 找不到')
+  const names = [...setMatch[1].matchAll(/'([A-Za-z]+)'/g)].map((x) => x[1])
+  const assertFn = new Function('RESERVED_REMOTE_NAMES', 'JSON', m[0].replace(
+    'function assertRemoteMethodName(method) {',
+    'return function assertRemoteMethodName(method) {',
+  ))(new Set(names), JSON)
+
+  for (const bad of ['install', 'remove', 'has', 'empty', 'namespace', 'ctx']) {
+    assert.throws(() => assertFn(bad), /collides with the gateway namespace service/, bad + ' 应当被拦下')
+  }
+  for (const good of ['status', 'inspect', 'check', 'update', 'installSkills', 'setConfig', 'openSkillsDir']) {
+    assert.doesNotThrow(() => assertFn(good), good + ' 不应被拦')
+  }
+})

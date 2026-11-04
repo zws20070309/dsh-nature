@@ -37,6 +37,8 @@
   "catalog.triggerHint": "该技能在 SKILL.md 里登记的触发名是 {trigger}（目录名与触发名不同）",
   "install.title": "技能安装状态",
   "install.unknown": "正在读取安装状态…如果一直停在这里，说明宿主服务未就绪，重启 DSH 即可。",
+  "install.diagMountFailed": "远程通道挂载失败：{message}",
+  "install.diagNoNamespace": "远程通道已挂载，但命名空间未出现。请把这一行发给作者。",
   "install.progress": "{have}/{total} 已安装",
   "install.complete": "全套 {n} 个 nature 技能已就绪",
   "install.empty": "未检测到 nature 技能",

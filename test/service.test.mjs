@@ -289,7 +289,7 @@ test('install(): 无基线时仍能走完并回完整状态 + outcome', async ()
     })
     service.downloadBlob = async () => Buffer.from('---\nname: nature-figure\n---\n')
 
-    const result = await service.install()
+    const result = await service.installSkills()
     // 返回形状必须与 status() 同形（浏览器半直接拿它覆盖状态）
     for (const key of ['version', 'lastCheckStatus', 'changedSkills', 'manifest', 'config', 'installation']) {
       assert.ok(Object.hasOwn(result, key), 'install() 结果缺字段 ' + key)
@@ -324,7 +324,7 @@ test('install(skillNames): 点名只装指定的，其余不碰', async () => {
     })
     service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
 
-    const result = await service.install(['nature-figure'])
+    const result = await service.installSkills(['nature-figure'])
     assert.deepEqual(result.outcome.installed, ['nature-figure'])
     const dirs = await readdir(skills)
     assert.deepEqual(dirs, ['nature-figure'], '没点名的 skill 不该被创建')
@@ -366,7 +366,7 @@ test('instal 并发：同时在飞的任务数达到上限，且单文件失败�
       return Buffer.from('---\nname: nature-figure\n---\n')
     }
 
-    const result = await service.install(['nature-figure'])
+    const result = await service.installSkills(['nature-figure'])
     assert.ok(peak > 1, '并发未生效：峰值同时在飞 ' + peak + '（应 > 1）')
     assert.ok(peak <= 6, '并发超过上限：峰值 ' + peak + '（上限是 6）')
     assert.equal(result.outcome.failures.length, 1, '单文件失败要如实记录')
@@ -429,7 +429,7 @@ test('基线只记已装 skill：install 部分技能后 update 仍能把缺的�
     service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
 
     // 只装 1 个
-    const first = await service.install(['nature-figure'])
+    const first = await service.installSkills(['nature-figure'])
     assert.deepEqual(first.installation.installed, ['nature-figure'])
     // 基线必须只有已装的那一个，绝不能把没装的也记进去
     const baseline = Object.keys(first.manifest.files)
@@ -548,7 +548,7 @@ test('install: 全部下载失败时 installed=[] 且不写基线', async () => 
     })
     service.downloadBlob = async () => { throw new Error('ECONNRESET') }
 
-    const res = await service.install()
+    const res = await service.installSkills()
     assert.deepEqual(res.outcome.installed, [], '下载全失败时绝不能报"已安装"')
     assert.equal(res.outcome.ok, false)
     assert.deepEqual(res.installation.installed, [], '磁盘真相就是空的')
@@ -580,7 +580,7 @@ test('install: 成功后 installed 与磁盘一致；部分失败要如实标记
       if (rel.endsWith('extra.md')) throw new Error('ECONNRESET')
       return Buffer.from('---\nname: nature-figure\n---\n')
     }
-    const res = await service.install()
+    const res = await service.installSkills()
     assert.deepEqual(res.outcome.installed, ['nature-figure'], 'SKILL.md 落盘就算装上')
     assert.deepEqual(res.installation.installed, ['nature-figure'], 'installed 必须与磁盘一致')
     assert.equal(res.outcome.ok, false, '有文件失败 → ok=false')
@@ -606,7 +606,7 @@ test('install: 非法技能名进 skipped，不再静默成功', async () => {
     service.fetchSkillFiles = async () => ({})
     service.downloadBlob = async () => Buffer.from('x')
 
-    const res = await service.install(['not-a-nature-skill'])
+    const res = await service.installSkills(['not-a-nature-skill'])
     assert.ok(res.outcome.skipped.includes('not-a-nature-skill'), '非法名字必须出现在 skipped 里')
     assert.deepEqual(res.outcome.installed, [])
   } finally {
