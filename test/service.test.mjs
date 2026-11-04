@@ -730,3 +730,65 @@ test('上游技能数不变时 roster 不被重复计入 rosterAdded', async () 
     await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
 })
+
+// ── 回归：rosterAdded/rosterRemoved 不能被重复调用覆盖成空 ──────────────────────
+// 实机踩到：runCheck 里 learnRoster 被调了两次（一次在头部、一次在 headSha 分支），
+// 第二次的 before 已是第一次更新后的值 → 差异恒为空 → 面板永远提示不了"上游新增"。
+test('上游增删技能时 rosterAdded / rosterRemoved 如实上报（不能被重复调用清空）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-roster3-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    const base = {}
+    for (const name of mod.NATURE_SKILLS) base[name + '/SKILL.md'] = 'a'.repeat(40)
+    let head = '1'.repeat(40)
+    let tree = base
+    service.fetchHeadSha = async () => head
+    service.fetchSkillFiles = async () => tree
+    service.downloadBlob = async () => Buffer.from('x')
+
+    await service.installSkills()
+
+    // 上游：删掉 nature-figure，新增 nature-added
+    const changed = { ...base }
+    delete changed['nature-figure/SKILL.md']
+    changed['nature-added/SKILL.md'] = 'b'.repeat(40)
+    tree = changed
+    head = '2'.repeat(40)
+
+    const checked = await service.check()
+    assert.deepEqual(checked.rosterAdded, ['nature-added'], '上游新增必须能报出来')
+    assert.deepEqual(checked.rosterRemoved, ['nature-figure'], '上游删除必须能报出来')
+    // 上游删除不等于删用户文件：本地目录还在
+    const { readdir } = await import('node:fs/promises')
+    assert.ok((await readdir(join(home, 'skills'))).includes('nature-figure'), '不能擅自删用户已有的目录')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('learnRoster: 远端树为空时不动现有 roster（异常快照不能清空认知）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-roster4-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    const before = service.status().roster.length
+    const out = service.learnRoster({})
+    assert.deepEqual(out, { added: [], removed: [] })
+    assert.equal(service.status().roster.length, before, '空树不该清空 roster')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
