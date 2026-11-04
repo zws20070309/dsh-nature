@@ -407,3 +407,59 @@ function buildInstallationView() {
   return new Function('CATALOG_TOTAL',
     m[0].replace('function installationView(raw) {', 'return function installationView(raw) {'))(total)
 }
+
+// ── 回归：namespaceApi 必须真的返回命名空间 ─────────────────────────────────────
+// 实机踩到（P0）：编辑时把 namespaceApi 的 `return namespace` 弄丢了，
+// 函数变成"只抛错不返回"，api() 永远拿到 undefined —— 于是所有远程调用都失败，
+// 面板显示「宿主服务未就绪」，重启无数次都没用（宿主半其实是好的）。
+// 现有测试全是源码正则断言，抓不到"少一个 return"这种逻辑错误，所以这里真跑。
+test('namespaceApi: api() 必须返回命名空间对象，而不是 undefined', async () => {
+  const vm = await import('node:vm')
+  let reg
+  const sandbox = { window: { __ModuleLoader__: { load(value) { reg = value } } }, console }
+  vm.createContext(sandbox)
+  vm.runInContext(source, sandbox)
+
+  const ReactStub = {
+    createElement: () => null,
+    useCallback: (fn) => fn,
+    useEffect() {},
+    useRef: (init) => ({ current: init }),
+    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+  }
+
+  const namespace = { status: async () => ({ ok: true, value: {} }) }
+  const seen = []
+  const slots = {
+    // 真实调用链：ctx.slots.inject(owner, () => ctx.slots.register({...inject: injectApi}, Comp))
+    // 先跑 factory() 触发 register，拿注册项上的 inject 工厂，再调用它 —— 等价于框架挂载那一刻。
+    inject(owner, factory) {
+      try { factory() } catch { /* register 已捕获 options，下面统一断言 */ }
+      return () => {}
+    },
+    register(options) {
+      if (options && typeof options.inject === 'function') {
+        try {
+          const injected = options.inject()
+          if (injected && typeof injected.api === 'function') seen.push(injected.api)
+        } catch { /* 抓不到就交给下面的断言报错 */ }
+      }
+      return () => {}
+    },
+  };
+
+  await reg.factory(() => ReactStub).apply({
+    effect(fn) { try { return fn() } catch { return () => {} } },
+    get(key) { return key === 'remote.dshNature' ? namespace : undefined },
+    locale: { register() { return () => {} }, bind() { return (key) => key } },
+    remote: { async $mount() {} },
+    slots,
+  })
+
+  assert.ok(seen.length > 0, '没有捕获到任何槽位的 api 工厂')
+  for (const api of seen) {
+    const resolved = api()
+    assert.notEqual(resolved, undefined, 'api() 返回了 undefined —— namespaceApi 丢了 return')
+    assert.equal(resolved, namespace, 'api() 必须返回 ctx.get("remote.dshNature") 的结果')
+  }
+})
