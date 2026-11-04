@@ -402,3 +402,67 @@ test('installation 快照自带派生字段（total/installedCount/empty/partial
     await rm(home, { recursive: true, force: true })
   }
 })
+
+// ── 回归：基线只能记"真正落盘的 skill" ──────────────────────────────────────────
+// 实机踩到（P1）：install(['nature-figure']) 之后 manifest 里记了整棵远端树的 3 条，
+// 于是 update() 的 diff 认为另外 2 个 skill "已是最新"，它们永远装不上。
+// 根因是更新基线时直接写了 remoteFiles。修法：按 installation.installed 裁剪。
+test('基线只记已装 skill：install 部分技能后 update 仍能把缺的补上', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-baseline-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    const remote = {
+      'nature-figure/SKILL.md': 'a'.repeat(40),
+      'nature-writing/SKILL.md': 'b'.repeat(40),
+      'nature-data/SKILL.md': 'c'.repeat(40),
+    }
+    service.fetchHeadSha = async () => 'd'.repeat(40)
+    service.fetchSkillFiles = async () => remote
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+
+    // 只装 1 个
+    const first = await service.install(['nature-figure'])
+    assert.deepEqual(first.installation.installed, ['nature-figure'])
+    // 基线必须只有已装的那一个，绝不能把没装的也记进去
+    const baseline = Object.keys(first.manifest.files)
+    assert.equal(baseline.length, 1, '基线里混入了未安装的 skill：' + baseline.join(','))
+    assert.ok(baseline[0].startsWith('nature-figure/'))
+
+    // 关键：此时 update() 应该能看见还缺的，并把它们装上。
+    // 注意 complete 的定义是「24 个全套齐全」，这组夹具只有 3 个技能，
+    // 所以绝不能断言 complete=true —— 要断言的是"缺的被补上了"。
+    const second = await service.update()
+    assert.deepEqual([...second.installation.installed].sort(), ['nature-data', 'nature-figure', 'nature-writing'],
+      'update() 应把远端有、本地没有的 skill 补上')
+    assert.deepEqual([...second.outcome.updated].sort(), ['nature-data', 'nature-writing'])
+    assert.equal(second.installation.complete, false, '只有 3/24 不可能是 complete')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('baselineFor: 未装任何技能时给空基线（不是整棵远端树）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-bf-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    await service.refreshInstallation()
+    const out = service.baselineFor({ 'nature-figure/SKILL.md': 'a'.repeat(40) })
+    assert.deepEqual(out, {}, '一个都没装时基线必须是空的')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
