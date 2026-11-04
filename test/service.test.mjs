@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join, resolve, sep } from 'node:path'
+import { readFileSync } from 'node:fs'
 
 import { diffTrees, normalizeSkillPath, pickChangedSkillNames, SOURCES } from '../lib/index.js'
 
@@ -1155,5 +1156,79 @@ test('多源: 只装反防御技能后，顶层 manifest 必须包含它们的�
       'update() 不能被误判成缺基线，实际 reason=' + updated.outcome.reason)
   } finally {
     await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归：技能早已装好（无基线）时，check/update 必须能用 ──────────────────────
+// 用户最常见的处境：技能本来就在磁盘上（手工拷贝 / 旧版插件 / 别的工具），
+// 装上本插件后只想「检查更新」。
+// 旧行为：needsBaseline 要求顶层 manifest.headSha 非空，而多源下顶层 headSha
+// 镜像主源 —— 只装反防御技能时主源没装东西 → headSha=null → needsBaseline 恒真
+// → 状态永远 baseline-missing → update() 永远拒绝动手（用户以为更新坏了）。
+// 2026-11-05 真实场景实测。
+test('回归: 技能已装好且无基线时，check 自动补基线、update 不再被拒', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-adopt-'))
+  const skills = join(home, 'skills')
+  try {
+    // 磁盘上先有两个反防御技能（模拟"早已装好"）
+    for (const name of ['anti-defensive-writing', 'anti-defensive-writing-en']) {
+      await mkdir(join(skills, name), { recursive: true })
+      await writeFile(join(skills, name, 'SKILL.md'), '---\nname: ' + name + '\n---\n')
+    }
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    const files = {
+      'anti-defensive-writing/SKILL.md': 'a'.repeat(40),
+      'anti-defensive-writing-en/SKILL.md': 'b'.repeat(40),
+    }
+    service.fetchAllSources = async () => ({
+      files,
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd1'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: {} },
+        'anti-defensive': { headSha: 'd1'.padEnd(40, '0'), files },
+      },
+      failures: [],
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+
+    const checked = await service.check()
+    assert.equal(checked.lastCheckStatus, 'upToDate',
+      '已装的技能应被采纳为基线，状态不该停在 baseline-missing，实际 ' + checked.lastCheckStatus)
+    assert.equal(Object.keys(checked.manifest.files).length, 2, '基线应含这两个已装技能')
+    // 顶层 headSha 仍是主源的 null（主源一个都没装），但基线判断不该被它卡住。
+    assert.equal(checked.sources.find((s) => s.id === 'anti-defensive').baselineSha, 'd1'.padEnd(40, '0'))
+
+    const updated = await service.update(['anti-defensive-writing'])
+    assert.notEqual(updated.outcome.reason, 'baseline-missing',
+      'update() 不能被误判成缺基线，实际 reason=' + updated.outcome.reason)
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('needsBaseline: 只凭文件清单判定，headSha 为空但有清单时不算缺基线', () => {
+  // 直接测纯函数语义（它是 update/check 门闸的核心）。
+  // 这里有清单没 headSha = 多源下主源没装技能，但副源清单是好的。
+  const mod = require_needsBaseline()
+  assert.equal(mod({ headSha: null, files: { 'a/SKILL.md': 'x' } }), false,
+    '有清单就不算缺基线，哪怕顶层 headSha 是 null')
+  assert.equal(mod({ headSha: 'a'.repeat(40), files: {} }), true, '空清单 = 缺基线')
+  assert.equal(mod(null), true)
+  assert.equal(mod(undefined), true)
+
+  function require_needsBaseline() {
+    // needsBaseline 未导出：从源码抽出来真跑。
+    const src = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+    const m = /function needsBaseline\(manifest\) \{[\s\S]*?\n\}/.exec(src)
+    assert.ok(m, 'needsBaseline 找不到')
+    return new Function('isPlainObject', 'return ' + m[0].replace('function needsBaseline(manifest) {', 'function needsBaseline(manifest) {'))(
+      (v) => v !== null && typeof v === 'object' && !Array.isArray(v),
+    )
   }
 })
