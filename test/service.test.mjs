@@ -298,7 +298,7 @@ test('install(): 无基线时仍能走完并回完整状态 + outcome', async ()
     assert.deepEqual(result.outcome.installed, ['nature-figure'], '远端只有这一个 → 只装它')
     // 关键：install 之后必须真的可被发现（安装快照重扫过）
     assert.deepEqual(result.installation.installed, ['nature-figure'])
-    assert.equal(result.installation.complete, false)
+    // roster 现在学自远端：远端只有这 1 个技能，装完就是「全套齐全」。    // （旧行为把内置 24 项当权威，装 1 个永远 complete=false —— 那正是    //   「上游变成 25 个就发现不了」的同一个病根。）    assert.equal(result.installation.total, 1, '权威清单应等于远端实际技能数')    assert.equal(result.installation.complete, true)
     // 基线被快进（否则用户永远停在"未建立基线"）
     assert.equal(result.manifest.headSha, 'a'.repeat(40))
   } finally {
@@ -443,7 +443,9 @@ test('基线只记已装 skill：install 部分技能后 update 仍能把缺的�
     assert.deepEqual([...second.installation.installed].sort(), ['nature-data', 'nature-figure', 'nature-writing'],
       'update() 应把远端有、本地没有的 skill 补上')
     assert.deepEqual([...second.outcome.updated].sort(), ['nature-data', 'nature-writing'])
-    assert.equal(second.installation.complete, false, '只有 3/24 不可能是 complete')
+    // 同理：远端只有 3 个技能，装齐就是 complete。
+    assert.equal(second.installation.total, 3)
+    assert.equal(second.installation.complete, true, '远端只有 3 个，装齐即完整')
   } finally {
     await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
@@ -635,6 +637,157 @@ test('setConfig: 改 targetDir 后立即重扫安装状态', async () => {
     const after = await service.setConfig({ targetDir: dirB })
     assert.equal(after.installation.installedCount, 1, '改到 B 后必须立刻看到 B 的技能')
     assert.deepEqual(after.installation.installed, ['nature-figure'])
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 新能力：上游技能数变化（24 → 25 → 26）必须自动跟上 ──────────────────────────
+// 用户明确要求：远端从 24 变 25、26 时，插件要能发现并装上新增的技能。
+// 旧实现把 NATURE_SKILLS 当权威清单（写死 24 个），上游新增技能完全无感。
+// 现在：roster 学自远端树，内置清单只作离线兜底。
+test('rosterFromTree: 从远端树提取权威技能清单（按 SKILL.md 判定）', async () => {
+  const mod = await import('../lib/index.js')
+  const tree = {
+    'nature-a/SKILL.md': 'a'.repeat(40),
+    'nature-a/lib/x.py': 'b'.repeat(40),
+    'nature-b/SKILL.md': 'c'.repeat(40),
+    // 没有 SKILL.md 的目录不算一个技能
+    'nature-c/notes.txt': 'd'.repeat(40),
+  }
+  assert.deepEqual(mod.rosterFromTree(tree), ['nature-a', 'nature-b'])
+  assert.deepEqual(mod.rosterFromTree({}), [], '空树返回空数组')
+  assert.deepEqual(mod.rosterFromTree(null), [], '坏输入返回空数组')
+})
+
+test('上游新增技能：check 后 roster/总数自动跟上，且能装到新技能', async () => {
+  const { mkdtemp, rm, readdir } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-roster-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    // 模拟上游：现有 24 个 + 2 个新增 = 26
+    const remote = {}
+    for (const name of mod.NATURE_SKILLS) remote[name + '/SKILL.md'] = 'a'.repeat(40)
+    remote['nature-brand-new/SKILL.md'] = 'b'.repeat(40)
+    remote['nature-second-new/SKILL.md'] = 'c'.repeat(40)
+    service.fetchHeadSha = async () => 'e'.repeat(40)
+    service.fetchSkillFiles = async () => remote
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+
+    // check 就该发现新技能（旧实现这里恒为 24）
+    const checked = await service.check()
+    assert.equal(checked.roster.length, mod.NATURE_SKILLS.length + 2, 'roster 必须随远端增长')
+    assert.deepEqual(checked.rosterAdded.slice().sort(), ['nature-brand-new', 'nature-second-new'])
+    assert.equal(checked.installation.total, mod.NATURE_SKILLS.length + 2, '总数必须跟着变')
+
+    // 全量安装必须包含新增的那两个（旧实现会被白名单挡掉）
+    const installedAll = await service.installSkills()
+    assert.equal(installedAll.outcome.installed.length, mod.NATURE_SKILLS.length + 2)
+    assert.ok(installedAll.outcome.installed.includes('nature-brand-new'), '必须装上上游新增的技能')
+    assert.equal(installedAll.installation.complete, true)
+    const dirs = await readdir(skills)
+    assert.ok(dirs.includes('nature-brand-new'))
+
+    // 点名安装一个上游新增的技能也要能成功（白名单以 roster 为准）
+    await rm(skills, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    const oneNew = await service.installSkills(['nature-second-new'])
+    assert.deepEqual(oneNew.outcome.installed, ['nature-second-new'])
+    assert.deepEqual(await readdir(skills), ['nature-second-new'])
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('上游技能数不变时 roster 不被重复计入 rosterAdded', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-roster2-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+    const remote = {}
+    for (const name of mod.NATURE_SKILLS) remote[name + '/SKILL.md'] = 'a'.repeat(40)
+    service.fetchHeadSha = async () => 'f'.repeat(40)
+    service.fetchSkillFiles = async () => remote
+    service.downloadBlob = async () => Buffer.from('x')
+
+    const first = await service.check()
+    assert.equal(first.roster.length, mod.NATURE_SKILLS.length)
+    // 第二次 check 同样内容：不该有"新增"
+    const second = await service.check()
+    assert.deepEqual(second.rosterAdded, [], '没变化就不该报新增')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归：rosterAdded/rosterRemoved 不能被重复调用覆盖成空 ──────────────────────
+// 实机踩到：runCheck 里 learnRoster 被调了两次（一次在头部、一次在 headSha 分支），
+// 第二次的 before 已是第一次更新后的值 → 差异恒为空 → 面板永远提示不了"上游新增"。
+test('上游增删技能时 rosterAdded / rosterRemoved 如实上报（不能被重复调用清空）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-roster3-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    const base = {}
+    for (const name of mod.NATURE_SKILLS) base[name + '/SKILL.md'] = 'a'.repeat(40)
+    let head = '1'.repeat(40)
+    let tree = base
+    service.fetchHeadSha = async () => head
+    service.fetchSkillFiles = async () => tree
+    service.downloadBlob = async () => Buffer.from('x')
+
+    await service.installSkills()
+
+    // 上游：删掉 nature-figure，新增 nature-added
+    const changed = { ...base }
+    delete changed['nature-figure/SKILL.md']
+    changed['nature-added/SKILL.md'] = 'b'.repeat(40)
+    tree = changed
+    head = '2'.repeat(40)
+
+    const checked = await service.check()
+    assert.deepEqual(checked.rosterAdded, ['nature-added'], '上游新增必须能报出来')
+    assert.deepEqual(checked.rosterRemoved, ['nature-figure'], '上游删除必须能报出来')
+    // 上游删除不等于删用户文件：本地目录还在
+    const { readdir } = await import('node:fs/promises')
+    assert.ok((await readdir(join(home, 'skills'))).includes('nature-figure'), '不能擅自删用户已有的目录')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('learnRoster: 远端树为空时不动现有 roster（异常快照不能清空认知）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-roster4-'))
+  try {
+    let service
+    const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
+    mod.apply(ctx, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    const before = service.status().roster.length
+    const out = service.learnRoster({})
+    assert.deepEqual(out, { added: [], removed: [] })
+    assert.equal(service.status().roster.length, before, '空树不该清空 roster')
   } finally {
     await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

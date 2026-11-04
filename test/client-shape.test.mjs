@@ -515,3 +515,41 @@ test('assertRemoteMethodName: 撞保留名立刻抛错，合法名放行', () =>
     assert.doesNotThrow(() => assertFn(good), good + ' 不应被拦')
   }
 })
+
+// ── 新能力：客户端目录必须跟着 roster 走（上游 24→25→26）──────────────────────
+// 写死分组 + 写死总数会让「安装状态 26/26」和「目录 24 项」同屏自相矛盾。
+test('installationView: total 优先用宿主下发的次数，而不是写死常量', () => {
+  const installationView = buildInstallationView()
+
+  // 宿主说 26 个（学自远端），即便内置常量是 24 也必须显示 26
+  const grown = installationView({ installed: [], missing: [], total: 26, complete: false })
+  assert.equal(grown.total, 26, '上游增长后 total 必须跟着变')
+  assert.equal(grown.known, true)
+
+  // 宿主没给 total（老宿主）→ 退回内置常量，不能是 undefined
+  const legacy = installationView({ installed: [], missing: [], complete: false })
+  assert.equal(typeof legacy.total, 'number')
+  assert.ok(legacy.total > 0)
+})
+
+test('Catalog: 静态分组之外的新技能不能从目录里消失', () => {
+  const fnSrc = /function Catalog\(props\) \{[\s\S]*?\n    \}/.exec(source)
+  assert.ok(fnSrc, 'Catalog 找不到')
+  // 目录必须读用 props.roster（动态），而不是直接躺 CATALOG
+  assert.match(fnSrc[0], /const \{ t, roster \} = props/, 'Catalog 必须接收 roster')
+  assert.match(fnSrc[0], /listed/, 'Catalog 必须基于 roster 计算展示集合')
+  assert.match(fnSrc[0], /group\.newer/, '静态分组没覆盖的新技能要单独成组')
+  // 调用点必须真的把 status.roster 传进去
+  assert.match(source, /h\(Catalog, \{ t, roster: status\.roster \}\)/, 'Catalog 调用点必须传 roster')
+})
+
+test('statusView: 透传宿主的 roster 供目录渲染', () => {
+  const statusView = buildStatusView()
+  const view = statusView({
+    roster: ['nature-a', 'nature-b'],
+    installation: { installed: [], missing: [], total: 2, complete: false },
+  })
+  assert.deepEqual(view.roster, ['nature-a', 'nature-b'])
+  // 坏形状被清洗成空数组，不是 undefined
+  assert.deepEqual(statusView({ roster: 'nope' }).roster, [])
+})

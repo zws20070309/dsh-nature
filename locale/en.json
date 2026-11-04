@@ -61,6 +61,7 @@
   "group.delivery": "Conversion & delivery",
   "group.review": "Review & response",
   "group.shared": "Internal shared",
+  "group.newer": "New upstream",
   "footer.openDir": "Open skills directory",
   "footer.github": "GitHub repository",
   "settings.autoCheck": "Check for updates automatically",
