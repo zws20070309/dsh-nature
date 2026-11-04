@@ -1,6 +1,6 @@
 # dsh-nature 设计定稿
 
-> 依据：DSH v0.2.1-rc.5 asar 源码解剖（临时/dsh-preset-internals.md、临时/dsh-ui-internals.md）、PTC 与生态调研（临时/ptc-ecosystem-research.md）、nature-skills 全套消化（docs/nature-skills-digest.md）、本机三个在用插件源码实读。所有结论可溯源，禁止无依据改动。
+> 依据：DSH v0.2.1-rc.5 的 asar 源码解剖（预设系统与插件 UI/服务契约）、PTC 与生态调研、nature-skills 全套消化（见 docs/nature-skills-digest.md）、若干在用的第三方插件源码实读。所有结论可溯源，禁止无依据改动。
 
 ## 0. 一句话
 
@@ -81,7 +81,7 @@ dsh-nature/
 
 ### 3.3 安装链（tools/）
 
-1. `install.ps1`：建 `C:\Users\ZWS\.dsh\plugins\dsh-nature` symlink → 本仓库；profile `package.json` 增 `"@zws/dsh-nature": "link:..."`；`dsh.profile.bundles` 追加 `@zws/dsh-nature`（均先备份）；调用 `baseline.cjs`。
+1. `install.ps1`：在 `$DSH_HOME/plugins/` 下建 `dsh-nature` symlink → 本仓库；profile `package.json` 增 `"@zws/dsh-nature": "link:..."`；`dsh.profile.bundles` 追加 `@zws/dsh-nature`（均先备份）；调用 `baseline.cjs`。
 2. `baseline.cjs`：`git -C <clone> ls-tree -r HEAD -- skills/` 生成 `{headSha, files}` 基线写入 state 文件（离线、精准——git blob sha 内容寻址）。
 3. 重启 DSH 生效。
 

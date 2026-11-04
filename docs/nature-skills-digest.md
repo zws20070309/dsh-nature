@@ -1,8 +1,8 @@
 # nature-skills 全套 Skill 消化文档
 
 > 供「论文写作 agent 预设 + DSH 插件」构建使用。
-> 依据：`C:\Users\ZWS\.agents\skills\nature-*`（即仓库 `D:/Desktop/插件/临时/nature-skills/skills/`，两处内容一致，已逐个核对文件清单）。
-> 共 23 个可触发 skill + 1 个内部共享包 `nature-shared`（README 技能索引同口径，见 `临时/nature-skills/README.md` §6）。本文所有结论均来自对各 SKILL.md 及其 references/scripts/assets 的实读，未读部分不写。
+> 依据：上游仓库 <https://github.com/Yuan1z0825/nature-skills> 的 `skills/nature-*` 目录（已逐个核对文件清单）。
+> 共 23 个可触发 skill + 1 个内部共享包 `nature-shared`（与该仓库 README 的技能索引同口径）。本文所有结论均来自对各 SKILL.md 及其 references/scripts/assets 的实读，未读部分不写。
 
 ---
 
