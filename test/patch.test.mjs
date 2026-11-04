@@ -48,14 +48,17 @@ function personaPrefixFromPatch() {
     out.push(l.slice(contentIndent));
   }
   while (out.length > 0 && out[out.length - 1] === '') out.pop();
-  return out.join('\n');
+  return out.join('\n').replace(/\r\n/g, '\n');
 }
 
 // persona.md 中 ```text 围栏内的原文（persona 文本不含反引号，非贪婪匹配安全）。
+// 行尾统一成 LF 再比：仓库 core.autocrlf=true，Windows 签出的是 CRLF，而 YAML 的 |- 块
+// 标量**按规范把换行归一成 LF**——宿主真正加载到的就是 LF 文本。拿 CRLF 的原文去比，
+// 在 Windows 上永远不等（这不是文本漂移，是两边行尾表示不同）。
 function personaFromDoc() {
   const m = personaDoc.match(/```text\r?\n([\s\S]*?)\r?\n```/);
   assert.ok(m, 'preset/persona.md 必须含一段 ```text 围栏包裹的 persona 原文');
-  return m[1];
+  return m[1].replace(/\r\n/g, '\n');
 }
 
 test('文件以 - insert: 开头', () => {
