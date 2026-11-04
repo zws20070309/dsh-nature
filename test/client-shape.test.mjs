@@ -259,3 +259,105 @@ test('statusView: 宿主状态形状归一化（baseline/needsBaseline/lastError
   assert.equal(updated.changedSkills.length, 1, '形状不对的行被丢弃')
   assert.deepEqual(updated.changedSkills[0], { name: 'nature-figure', added: 1, removed: 0, modified: 2 })
 })
+
+
+// ── 回归：main 槽面板必须自己当滚动容器 ─────────────────────────────────────────
+// main 槽父级 .mP3x-q_centerCol 是 {flex-direction:column;overflow:hidden}，高度由
+// .mP3x-q_frame{grid-template-rows:minmax(0,1fr) auto;height:100%} 定死。面板不声明
+// height + overflow-y 就只能无限增高、被父级裁掉——一屏以外既看不到也滚不到
+// （2026-11-04 实机复现：page clientHeight 等于内容全高，无任何可滚动祖先）。
+test('滚动：main 槽面板自带 height:100% + overflow-y:auto 的滚动容器', () => {
+  const cssMatch = /const CSS = `([\s\S]*?)\n`/.exec(source)
+  assert.ok(cssMatch, 'CSS 常量找不到')
+  const css = cssMatch[1]
+
+  const rule = /\.dsh-nature-scroll\{([^}]*)\}/.exec(css.replace(/\n/g, ''))
+  assert.ok(rule, '缺少 .dsh-nature-scroll 规则（main 槽的滚动容器）')
+  const body = rule[1]
+  assert.match(body, /height:100%/, '滚动容器必须 height:100%，否则跟随内容无限增高')
+  assert.match(body, /overflow-y:auto/, '滚动容器必须 overflow-y:auto')
+  assert.match(body, /min-height:0/, 'flex 子项必须 min-height:0，否则高度下限把内容撑开')
+
+  // 面板根节点必须真的用上这个类，且内容居中列还在里面（两层结构）。
+  const panel = /className: 'dsh-nature-scroll'[^\n]*\n(?:[^\n]*\n){0,3}[^\n]*className: 'dsh-nature-page'/.exec(source)
+  assert.ok(panel, 'WorkbenchPanel 必须是 .dsh-nature-scroll > .dsh-nature-page 两层结构')
+})
+
+// ── 回归：update() 必须回完整状态，界面才不会被"更新成功"带坏 ────────────────────
+// 客户端拿到动作结果直接 statusView(unwrap(remote)) 覆盖本地状态。宿主若回
+// {ok,headSha,updated,...} 这种明细形状，statusView 会归一化成"未建立基线 +
+// 目标目录为空"，一次更新就把页面显示成坏状态。
+test('statusView: 能识别 update 明细并按 outcome 带出', () => {
+  const fnMatch = /function statusView\(raw\) \{([\s\S]*?)\n    \}/.exec(source)
+  assert.ok(fnMatch, 'statusView 找不到')
+  const statusView = new Function(
+    'PLUGIN_VERSION',
+    fnMatch[0].replace('function statusView(raw) {', 'return function statusView(raw) {'),
+  )(pkg.version)
+
+  const full = {
+    version: 1, headSha: 'a'.repeat(40), lastCheckedAt: '2026-11-04T01:00:00.000Z',
+    lastCheckStatus: 'upToDate', lastError: null, updateAvailable: false,
+    changedSkills: [], manifest: { headSha: 'a'.repeat(40), files: { 'x/SKILL.md': 'y' } },
+    config: { autoCheck: true, intervalHours: 6, targetDir: 'C:/skills', mirror: '' },
+    outcome: { ok: true, updated: ['nature-figure'], skipped: [], removed: [], failures: [] },
+  }
+  const view = statusView(full)
+  assert.equal(view.needsBaseline, false, '完整状态不该被判成缺基线')
+  assert.equal(view.config.targetDir, 'C:/skills', '目标目录必须保住')
+  assert.ok(view.outcome, 'outcome 必须带出')
+  assert.deepEqual(view.outcome.updated, ['nature-figure'])
+
+  // 没有 outcome 的普通状态：字段为 null，不炸。
+  assert.equal(statusView({ ...full, outcome: undefined }).outcome, null)
+})
+
+// ── 回归：目录名 ≠ 触发名的技能必须标出真实触发名 ────────────────────────────────
+// DSH 的 skill 名取 SKILL.md 的 frontmatter name，不是目录名
+// （dsh-skill-filesystem discoverRoot 里 `name: parsed.name`）。上游
+// nature-proposal-writer 目录的 frontmatter 是 name: researchwrite。
+test('catalog: 目录名与触发名不一致的技能有别名标注', () => {
+  const aliasMatch = /const TRIGGER_ALIASES = \{([\s\S]*?)\n    \}/.exec(source)
+  assert.ok(aliasMatch, '缺少 TRIGGER_ALIASES（目录名→触发名）')
+  assert.match(aliasMatch[1], /'nature-proposal-writer': 'researchwrite'/,
+    'nature-proposal-writer 的触发名是 researchwrite')
+
+  const catalogMatch = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(source)
+  const names = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].map((m) => m[1])
+  for (const key of Object.keys(TRIGGER_ALIAS_KEYS_FROM(aliasMatch[1]))) {
+    assert.ok(names.includes(key), '别名键必须真的在目录里：' + key)
+  }
+  function TRIGGER_ALIAS_KEYS_FROM(text) {
+    return Object.fromEntries([...text.matchAll(/'(nature-[a-z0-9-]+)':/g)].map((m) => [m[1], true]))
+  }
+})
+
+// ── 回归：启动必须分段兜底，一个入口坏了不能拖垮整个 bundle ──────────────────────
+// client bundle 与官方 bundle 拼成同一个脚本执行；apply() 里抛出的异常会连带
+// 官方入口一起死（"插件装了但完全没有入口"）。样式 / 文案 / Remote 挂载三段
+// 必须各自 try/catch，且 $mount 失败后仍要继续注册槽位。
+test('apply: 样式、文案、Remote 挂载三段各自兜底，$mount 失败仍注册槽位', async () => {
+  const registered = []
+  const failures = []
+  const brokenCtx = {
+    effect(fn) {
+      try { return fn() } catch (error) { failures.push(error); return () => {} }
+    },
+    get() { return undefined },
+    locale: { register() { return () => {} }, bind() { return (key) => key } },
+    // Remote 挂载直接抛错：真实场景是宿主服务没起来 / 网关拒挂。
+    remote: { async $mount() { throw new Error('mount exploded') } },
+    slots: {
+      inject(owner, factory) { return factory() },
+      register(options) { registered.push(options.name); return () => {} },
+    },
+  }
+  const exports = registration.factory(() => React)
+  // 关键断言：不抛异常。
+  await exports.apply(brokenCtx)
+  assert.deepEqual(
+    registered.sort(),
+    ['main', 'plugins.bundle.config', 'plugins.detail.badge', 'settings.section', 'sidebar.panellist'],
+    '$mount 失败后五个槽位仍必须全部注册（UI 要给 remoteNotMounted 的可读提示）',
+  )
+})

@@ -66,6 +66,7 @@ A Nature-grade academic writing suite for DeepSeek Harness: one repo, two pieces
 - **插件自身升级走官方 plugin market**：本插件的更新检测只针对 nature-skills 内容，不自建自升级。
 - **首次使用必须先建基线**：未跑 `tools/baseline.cjs` 前只会提示引导，不会把远端当全量去覆盖本地。
 - **定时检查依赖 DSH 进程存活**：`intervalHours` 的定时器跑在宿主侧，DSH 关闭时不检查。
+- **技能名以 SKILL.md 的 frontmatter 为准，不是目录名**：DSH 的技能发现读 frontmatter `name`（`dsh-skill-filesystem` 的 `discoverRoot`）。上游 `nature-proposal-writer` 目录登记的触发名是 `researchwrite`，工作台目录里两者都标出，persona 也按触发名写。
 
 ## 版本对照
 
@@ -74,6 +75,7 @@ A Nature-grade academic writing suite for DeepSeek Harness: one repo, two pieces
 | 0.2.1-rc.5 | 1.0.0 | 开发与验收基线（本机实测版本） |
 | 0.2.1-rc.5 | 1.0.1 | 挂载首拍 status() 挂起时有限重试（实机验收修复） |
 | 0.2.1-rc.5 | 1.0.2 | 动作类 RPC 超时重试 + 阶段恢复；raw 被墙时配置镜像源即可完成更新（实机全流程演练通过） |
+| 0.2.1-rc.5 | 1.0.3 | 主面板可滚动（此前一屏之外的内容不可达）；更新后不再把页面显示成「未建立基线」；目录标出真实触发名；启动分段兜底 |
 
 装错版本会被 DSH 在启动时整体拒绝，表现为「装了但完全没有入口」。
 

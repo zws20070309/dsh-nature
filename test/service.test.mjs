@@ -162,3 +162,44 @@ test('pickChangedSkillNames: 空变更与坏输入', () => {
   assert.deepEqual(pickChangedSkillNames(null), [])
   assert.deepEqual(pickChangedSkillNames(undefined), [])
 })
+
+// ── update() 契约：必须回完整状态（浏览器半直接拿它覆盖本地状态）───────────────
+// 客户端 UpdateCenter/SettingsPanel 拿到动作结果就 statusView(unwrap(remote))。
+// runUpdate 的内部明细形状没有 manifest/config，直接透出会把页面归一化成
+// 「未建立基线 + 目标目录为空」——一次更新就把界面显示成坏状态。
+test('update(): 没有基线时也回完整状态形状，明细在 outcome 里', async () => {
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-'))
+  try {
+    // 不联网：经真实公开入口 apply() 拿到服务实例；needsBaseline 分支在发请求前就返回。
+    const mod = await import('../lib/index.js')
+    let service
+    const ctx = {
+      logger: { warn() {} },
+      provide(key, instance) { service = instance },
+      effect() {},
+    }
+    mod.apply(ctx, { dshHome: home })
+    assert.ok(service, 'apply() 必须通过 ctx.provide 发布服务实例')
+    const result = await service.update()
+
+    // 契约：status() 的每个字段都在，外加 outcome。
+    for (const key of ['version', 'headSha', 'lastCheckedAt', 'lastCheckStatus', 'lastError',
+                       'updateAvailable', 'changedSkills', 'manifest', 'config']) {
+      assert.ok(Object.hasOwn(result, key), 'update() 结果缺字段 ' + key)
+    }
+    assert.ok(result.manifest && typeof result.manifest === 'object', 'manifest 必须是对象')
+    assert.ok(result.config && typeof result.config.targetDir === 'string' && result.config.targetDir.length > 0,
+      'config.targetDir 必须是非空字符串')
+    // 明细挂在 outcome 上。
+    assert.ok(result.outcome && typeof result.outcome === 'object', 'outcome 必须存在')
+    assert.equal(result.outcome.reason, 'baseline-missing')
+    assert.deepEqual(result.outcome.updated, [])
+    // 状态文件确实写了 baseline-missing（持久化生效）。
+    const state = JSON.parse(await readFile(join(home, 'dsh-nature-state.json'), 'utf8'))
+    assert.equal(state.lastCheckStatus, 'baseline-missing')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})

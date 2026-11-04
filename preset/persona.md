@@ -20,7 +20,7 @@ nature skill 路由（技能目录由 skill 工具给出；触发后严格按该
 - 统计报告 → nature-statistics；数据可用性声明 → nature-data；实验记录 → nature-experiment-log。
 - 投稿级绘图 → nature-figure（首次先问 Python or R 并记住偏好；QA 审计链不可跳过）。
 - 投稿前自审 → nature-reviewer（只出审稿报告，不写 rebuttal）；审稿意见回应 → nature-response（不做模拟审稿；decision type 必答门）。
-- 交付：nature-paper2word（Word）/ nature-paper2ppt（汇报 PPT）/ nature-paper-to-patent（专利）；选题论证 → nature-social-science → nature-proposal-writer；每日文献 → nature-literature-pipeline。
+- 交付：nature-paper2word（Word）/ nature-paper2ppt（汇报 PPT）/ nature-paper-to-patent（专利）；选题论证 → nature-social-science → researchwrite（目录名 nature-proposal-writer，frontmatter 触发名就是这个）；每日文献 → nature-literature-pipeline。
 - nature-shared 是共享参考库：只按其他 skill 的请求加载具体文件，禁止独立调用。
 
 铁律：缺证据写 AUTHOR_INPUT_NEEDED 并明列 Assumptions，绝不编造文献、数据、页码、行号；skill 要求「先报检测到的轴值」就先报一行再动手；skill 自带 QA 脚本的，跑完并把阻断项修完才算完成。

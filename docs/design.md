@@ -87,7 +87,7 @@ dsh-nature/
 
 ## 4. 质量门
 
-- `node --test test/`：manifest diff 纯函数、路径穿越防护、patch YAML 结构校验（preset 行字段/id 唯一/!!js 仅限 disabled）。
+- `npm test`（= `node --test test/*.test.mjs`）：manifest diff 纯函数、路径穿越防护、patch YAML 结构校验（preset 行字段/id 唯一/!!js 仅限 disabled）、以及三条 1.0.3 回归（见 §6）。
 - 双审查员逐行审（host 对照本设计 + 契约；client 对照 overclock/copy-session-id 先例），问题必须修复复测后才许提交。
 - 实机验收（我本人执行）：重启 DSH → 设置页可见并列入口 → 侧栏红点/工作台 → 模拟远端变更 → 增量更新只动变化的 skill → dev 分支验收后合 main。
 
@@ -96,3 +96,49 @@ dsh-nature/
 - 设置导航 label 无红点座位（官方 nav 行无 slot）→ 红点改为：侧栏图标 + 设置页头横幅 + 插件管理器 Tag，三处官方座位。
 - 插件不自建「插件自身升级」（生态共识走官方 plugin market）——本插件的更新检测只针对 nature-skills 内容。
 - workflow 行保持 ptc 原状禁用（与 PTC 一致）；如需工作流引擎可后续在 patch 里改 disabled（一行）。
+
+## 6. 1.0.3 修复记录（实机复现 → 修 → 验）
+
+### 6.1 P1 主面板不可滚动（用户报告）
+
+**现象**：工作台一页看不到全部技能，鼠标中键/滚轮都滚不动。
+
+**根因**：main 槽的父级是 `.mP3x-q_centerCol{flex-direction:column;overflow:hidden}`，高度由
+`.mP3x-q_frame{grid-template-rows:minmax(0,1fr) auto;height:100%}` 定死
+（`dsh-client-ui-layout/lib/client.js` 的 AppFrame CSS）。插件面板根节点只有
+`max-width/margin/padding`，没有 `height` 也没有 `overflow` → 面板随内容无限增高，
+超出视口的部分被父级 `overflow:hidden` 裁掉，全页没有任何可滚动祖先。
+
+**实机复现数据**（用官方 layout 真实 CSS 搭 DOM 链，浏览器实测）：
+修复前 `page clientHeight=1438px / 视口列高=697px / overflowY=visible / 可滚动=false / 内容被裁剪=true`；
+修复后 `可滚动=true / 内容被裁剪=false`，滚轮可直达底部按钮。
+
+**修法**：`.dsh-nature-scroll{box-sizing:border-box;height:100%;min-height:0;overflow-y:auto}`
+作唯一滚动容器，内层 `.dsh-nature-page` 只留居中与内边距。与官方面板同范式
+（plugin-manager `.page{height:100%;overflow:auto}`、skillhub `[data-surface=page]{max-height:100%;overflow:auto}`）。
+设置页**不加**这层：它在官方 `.AnXs9G_options{flex:1;min-height:0;overflow-y:auto}` 里已经会滚，再套一层就是双层滚动。
+
+### 6.2 P1 更新完成后页面被带坏
+
+**现象**：点「更新」后工作台/设置页把它显示成「未建立基线 + 目标目录为空」。
+
+**根因**：`update()` 回的是 `runUpdate` 的内部明细 `{ok,reason,headSha,updated,skipped,removed,failures}`，
+而客户端拿到动作结果直接 `statusView(unwrap(remote))` 覆盖本地状态。明细里没有
+`manifest`/`config` → 归一化出 `needsBaseline=true`、`targetDir=''`。
+
+**修法**：宿主 `update()` 改为 `{...this.status(), outcome}`，与 status/check/setConfig 同形；
+明细挂 `outcome`。客户端顺带把 outcome 用上，更新完显示「已更新 N 个技能」而不是只让红点消失。
+
+### 6.3 P2 目录名被当成触发名
+
+DSH 的技能名取 SKILL.md 的 frontmatter `name`（`dsh-skill-filesystem` 的 `discoverRoot`），
+不是目录名。上游 `nature-proposal-writer` 的 frontmatter 是 `name: researchwrite`，
+原 persona 与目录都写 `nature-proposal-writer` —— 那个名字模型根本触发不了。
+修法：目录用 `TRIGGER_ALIASES` 在同行标出真实触发名；persona 改为按 `researchwrite` 引用。
+
+### 6.4 P0 防护：启动分段兜底
+
+`apply()` 里 `installStyles` / `locale.register` / `remote.$mount` 三段各自 try/catch。
+此前 `$mount` 抛错会让整个 client bundle 挂掉（与官方 bundle 拼在同一脚本里），
+表现为「插件装了但完全没有入口」。现在 `$mount` 失败仍注册五个槽位，面板走
+`remoteNotMounted` 分支给可读提示。另有回归测试覆盖该失败路径。
