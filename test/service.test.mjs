@@ -1,8 +1,42 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join, resolve, sep } from 'node:path'
+import { readFileSync } from 'node:fs'
 
-import { diffTrees, normalizeSkillPath, pickChangedSkillNames } from '../lib/index.js'
+import { diffTrees, normalizeSkillPath, pickChangedSkillNames, SOURCES } from '../lib/index.js'
+
+
+/**
+ * 远端桩：多源改造后引擎只通过 fetchAllSources() 拉远端，
+ * 所以测试统一替换这一个方法，不必逐个 mock fetchHeadSha/fetchSkillFiles。
+ *
+ * skill 名以 `nature-` 开头的归到主源，其余归到反防御源 —— 与真实的
+ * 归属规则一致（两个源的技能名前缀天然不同）。
+ */
+function mockRemote(service, optionsOrGetter) {
+  // 传函数 = 每次调用重新求值，用来模拟「上游后来又变了」（同一实例连续 check）。
+  const read = () => (typeof optionsOrGetter === 'function' ? optionsOrGetter() : optionsOrGetter)
+  const live = () => {
+    const o = read()
+    return { headSha: o.headSha, files: o.files, failures: o.failures ?? [] }
+  }
+  service.fetchAllSources = async () => {
+    const { headSha, files, failures } = live()
+    const perSource = {}
+    const heads = {}
+    for (const source of SOURCES) {
+      const scoped = {}
+      for (const [rel, sha] of Object.entries(files)) {
+        const skill = rel.slice(0, rel.indexOf('/'))
+        const owned = skill.startsWith('nature-') ? 'nature' : 'anti-defensive'
+        if (owned === source.id) scoped[rel] = sha
+      }
+      perSource[source.id] = { headSha, files: scoped }
+      heads[source.id] = headSha
+    }
+    return { files, heads, perSource, failures }
+  }
+}
 
 // 只测纯函数：不联网、不碰磁盘真实目录（normalizeSkillPath 是纯字符串运算，
 // diffTrees / pickChangedSkillNames 只操作普通对象）。联网与磁盘行为由实机验收覆盖。
@@ -258,15 +292,22 @@ test('scanInstallation: 目标目录不存在时是"全缺"而不是抛错', asy
 })
 
 // ── 技能名清单是单一事实源：host 与 client 目录必须逐项一致 ──────────────────────
-test('NATURE_SKILLS 与 client 的 CATALOG 逐项一致（24 项、同名同序）', async () => {
+test('NATURE_SKILLS 与 client 的 CATALOG 逐项一致（26 项、同名同序）', async () => {
   const { readFile } = await import('node:fs/promises')
   const mod = await import('../lib/index.js')
   const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   const catalog = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(clientSource)
   assert.ok(catalog, 'client 的 CATALOG 找不到')
-  const clientNames = [...catalog[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].map((m) => m[1])
-  assert.equal(mod.NATURE_SKILLS.length, 24)
-  assert.deepEqual(clientNames, mod.NATURE_SKILLS, 'host NATURE_SKILLS 与 client CATALOG 必须同集同序')
+  // 目录跨两个上游源，两种命名前缀都要收（顺序即 CATALOG 分组顺序）。
+  const clientNames = [...catalog[1].matchAll(/'(nature-[a-z0-9-]+|anti-defensive-writing[a-z-]*)'/g)].map((m) => m[1])
+  assert.equal(mod.NATURE_SKILLS.length, 26, '内置清单 = 24 nature + 2 反防御')
+  // 比**集合**而不是顺序：运行时的 roster 来自远端树、经 normalizeRoster 排序，
+  // 目录的展示顺序由 CATALOG 分组决定 —— 两边的顺序本来就不同语义，强求同序
+  // 会在上游调整目录顺序时误报。这里守的是"没有谁漏掉/多出技能"。
+  assert.deepEqual([...clientNames].sort(), [...mod.NATURE_SKILLS].sort(),
+    'host NATURE_SKILLS 与 client CATALOG 必须同集')
+  // 多源：每个源的内置清单必须真的被登记在 SOURCES 里。
+  assert.deepEqual(mod.SOURCES.map((s) => s.id), ['nature', 'anti-defensive'])
 })
 
 // ── install()：无基线也能装（这是首装路径，update() 会拒绝）──────────────────────
@@ -283,10 +324,9 @@ test('install(): 无基线时仍能走完并回完整状态 + outcome', async ()
     await service.setConfig({ targetDir: skills, autoCheck: false })
 
     // 用假远端把网络摘掉：只验证"契约 + 落盘 + 重扫"这条本地链路。
-    service.fetchHeadSha = async () => 'a'.repeat(40)
-    service.fetchSkillFiles = async () => ({
+    mockRemote(service, { headSha: 'a'.repeat(40), files: {
       'nature-figure/SKILL.md': 'f74ffae6423160998b5983402eb627a5ba735fc7',
-    })
+    } })
     service.downloadBlob = async () => Buffer.from('---\nname: nature-figure\n---\n')
 
     const result = await service.installSkills()
@@ -317,11 +357,10 @@ test('install(skillNames): 点名只装指定的，其余不碰', async () => {
     const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
     mod.apply(ctx, { dshHome: home })
     await service.setConfig({ targetDir: skills, autoCheck: false })
-    service.fetchHeadSha = async () => 'b'.repeat(40)
-    service.fetchSkillFiles = async () => ({
+    mockRemote(service, { headSha: 'b'.repeat(40), files: {
       'nature-figure/SKILL.md': 'x'.repeat(40),
       'nature-writing/SKILL.md': 'y'.repeat(40),
-    })
+    } })
     service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
 
     const result = await service.installSkills(['nature-figure'])
@@ -352,12 +391,12 @@ test('instal 并发：同时在飞的任务数达到上限，且单文件失败�
     const files = {}
     files['nature-figure/SKILL.md'] = 'a'.repeat(40)
     for (let i = 0; i < 40; i++) files['nature-figure/f' + i + '.md'] = 'a'.repeat(40)
-    service.fetchHeadSha = async () => 'c'.repeat(40)
-    service.fetchSkillFiles = async () => files
+    mockRemote(service, { headSha: 'c'.repeat(40), files })
 
     let inFlight = 0
     let peak = 0
-    service.downloadBlob = async (head, rel) => {
+    // 新签名：downloadBlob(source, headSha, rel, blobSha) —— rel 是第三个参数。
+    service.downloadBlob = async (source, head, rel) => {
       inFlight += 1
       peak = Math.max(peak, inFlight)
       await new Promise((r) => setTimeout(r, 5))
@@ -424,8 +463,7 @@ test('基线只记已装 skill：install 部分技能后 update 仍能把缺的�
       'nature-writing/SKILL.md': 'b'.repeat(40),
       'nature-data/SKILL.md': 'c'.repeat(40),
     }
-    service.fetchHeadSha = async () => 'd'.repeat(40)
-    service.fetchSkillFiles = async () => remote
+    mockRemote(service, { headSha: 'd'.repeat(40), files: remote })
     service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
 
     // 只装 1 个
@@ -543,11 +581,10 @@ test('install: 全部下载失败时 installed=[] 且不写基线', async () => 
     const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
     mod.apply(ctx, { dshHome: home })
     await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
-    service.fetchHeadSha = async () => 'd'.repeat(40)
-    service.fetchSkillFiles = async () => ({
+    mockRemote(service, { headSha: 'd'.repeat(40), files: {
       'nature-figure/SKILL.md': 'a'.repeat(40),
       'nature-writing/SKILL.md': 'c'.repeat(40),
-    })
+    } })
     service.downloadBlob = async () => { throw new Error('ECONNRESET') }
 
     const res = await service.installSkills()
@@ -572,13 +609,12 @@ test('install: 成功后 installed 与磁盘一致；部分失败要如实标记
     const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
     mod.apply(ctx, { dshHome: home })
     await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
-    service.fetchHeadSha = async () => 'e'.repeat(40)
-    service.fetchSkillFiles = async () => ({
+    mockRemote(service, { headSha: 'e'.repeat(40), files: {
       'nature-figure/SKILL.md': 'a'.repeat(40),
       'nature-figure/extra.md': 'b'.repeat(40),
-    })
+    } })
     // SKILL.md 成功、extra.md 失败
-    service.downloadBlob = async (head, rel) => {
+    service.downloadBlob = async (source, head, rel) => {
       if (rel.endsWith('extra.md')) throw new Error('ECONNRESET')
       return Buffer.from('---\nname: nature-figure\n---\n')
     }
@@ -604,8 +640,7 @@ test('install: 非法技能名进 skipped，不再静默成功', async () => {
     const ctx = { logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }
     mod.apply(ctx, { dshHome: home })
     await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
-    service.fetchHeadSha = async () => 'f'.repeat(40)
-    service.fetchSkillFiles = async () => ({})
+    mockRemote(service, { headSha: 'f'.repeat(40), files: {} })
     service.downloadBlob = async () => Buffer.from('x')
 
     const res = await service.installSkills(['not-a-nature-skill'])
@@ -677,8 +712,7 @@ test('上游新增技能：check 后 roster/总数自动跟上，且能装到新
     for (const name of mod.NATURE_SKILLS) remote[name + '/SKILL.md'] = 'a'.repeat(40)
     remote['nature-brand-new/SKILL.md'] = 'b'.repeat(40)
     remote['nature-second-new/SKILL.md'] = 'c'.repeat(40)
-    service.fetchHeadSha = async () => 'e'.repeat(40)
-    service.fetchSkillFiles = async () => remote
+    mockRemote(service, { headSha: 'e'.repeat(40), files: remote })
     service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
 
     // check 就该发现新技能（旧实现这里恒为 24）
@@ -717,8 +751,7 @@ test('上游技能数不变时 roster 不被重复计入 rosterAdded', async () 
     await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
     const remote = {}
     for (const name of mod.NATURE_SKILLS) remote[name + '/SKILL.md'] = 'a'.repeat(40)
-    service.fetchHeadSha = async () => 'f'.repeat(40)
-    service.fetchSkillFiles = async () => remote
+    mockRemote(service, { headSha: 'f'.repeat(40), files: remote })
     service.downloadBlob = async () => Buffer.from('x')
 
     const first = await service.check()
@@ -749,8 +782,8 @@ test('上游增删技能时 rosterAdded / rosterRemoved 如实上报（不能被
     for (const name of mod.NATURE_SKILLS) base[name + '/SKILL.md'] = 'a'.repeat(40)
     let head = '1'.repeat(40)
     let tree = base
-    service.fetchHeadSha = async () => head
-    service.fetchSkillFiles = async () => tree
+    // 惰性：后续改动 head/tree 后，下一次 check 能读到新值（模拟上游真的变了）。
+    mockRemote(service, () => ({ headSha: head, files: tree }))
     service.downloadBlob = async () => Buffer.from('x')
 
     await service.installSkills()
@@ -790,5 +823,412 @@ test('learnRoster: 远端树为空时不动现有 roster（异常快照不能清
     assert.equal(service.status().roster.length, before, '空树不该清空 roster')
   } finally {
     await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 多源：反防御性写作（第二个上游仓库）必须与 nature 全家同等对待 ───────────────
+// 用户的原始诉求：nature 全套里没有反防御性写作 → 把那个 skill 也装进同一个
+// skills 目录，并且"更新检测以及更新也加上这个 skill"。
+// 这里逐条验证：检测、安装、更新、删除上报、部分源失败容错。
+test('多源: 反防御技能与 nature 一起被检测为"全套"', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const root = await mkdtemp(join(tmpdir(), 'dsh-nature-multi-scan-'))
+  try {
+    // 两个源的技能都摆上磁盘
+    for (const name of mod.NATURE_SKILLS) {
+      await mkdir(join(root, name), { recursive: true })
+      await writeFile(join(root, name, 'SKILL.md'), '---\nname: ' + name + '\n---\n')
+    }
+    const full = await mod.scanInstallation(root)
+    assert.equal(full.complete, true, '26 个全在磁盘上 → 全套齐全')
+    assert.equal(full.total, 26)
+    assert.ok(full.installed.includes('anti-defensive-writing'), '反防御技能必须被算进已安装')
+
+    // 只缺反防御的那两个 → 必须是"部分安装"，而不是"全套齐全"
+    const { rm: rmDir } = await import('node:fs/promises')
+    await rmDir(join(root, 'anti-defensive-writing'), { recursive: true, force: true })
+    await rmDir(join(root, 'anti-defensive-writing-en'), { recursive: true, force: true })
+    const partial = await mod.scanInstallation(root)
+    assert.equal(partial.complete, false, '缺反防御技能不能算全套齐全')
+    assert.deepEqual(partial.missing.sort(), ['anti-defensive-writing', 'anti-defensive-writing-en'])
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('多源: 安装会把两个源的技能都装上，且各自用自己的源下载', async () => {
+  const { mkdtemp, readdir, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-multi-install-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    mockRemote(service, {
+      headSha: 'a'.repeat(40),
+      files: {
+        'nature-figure/SKILL.md': 'a'.repeat(40),
+        'anti-defensive-writing/SKILL.md': 'b'.repeat(40),
+        'anti-defensive-writing-en/SKILL.md': 'c'.repeat(40),
+      },
+    })
+    // 记录每个文件是用哪个源下载的 —— 用错源会拼错 URL（真实网络下是 404）。
+    const seen = []
+    service.downloadBlob = async (source, head, rel) => {
+      seen.push(source.id + '|' + rel)
+      return Buffer.from('---\nname: x\n---\n')
+    }
+
+    const res = await service.installSkills()
+    assert.equal(res.outcome.ok, true, '两套技能都要装成功')
+    assert.deepEqual(res.outcome.installed.sort(),
+      ['anti-defensive-writing', 'anti-defensive-writing-en', 'nature-figure'])
+    const dirs = await readdir(skills)
+    assert.deepEqual(dirs.sort(), ['anti-defensive-writing', 'anti-defensive-writing-en', 'nature-figure'])
+
+    // 归属正确性：nature-* 走 nature 源，anti-defensive-* 走反防御源。
+    assert.ok(seen.includes('nature|nature-figure/SKILL.md'), 'nature 技能必须走 nature 源：' + JSON.stringify(seen))
+    assert.ok(seen.includes('anti-defensive|anti-defensive-writing/SKILL.md'), '反防御技能必须走反防御源：' + JSON.stringify(seen))
+    assert.ok(seen.includes('anti-defensive|anti-defensive-writing-en/SKILL.md'))
+    assert.equal(seen.some((row) => row.startsWith('nature|anti-defensive')), false, '不能把反防御技能发到 nature 源去下')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('多源: 只有反防御源更新时，check 也必须报出来（不能被 nature 的 sha 掩盖）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-multi-check-'))
+  try {
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    const natureFiles = { 'nature-figure/SKILL.md': 'a'.repeat(40) }
+    const antiFiles = { 'anti-defensive-writing/SKILL.md': 'b'.repeat(40) }
+    // 两个源各自独立的 head 与文件表
+    service.fetchAllSources = async () => ({
+      files: { ...natureFiles, ...antiFiles },
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd1'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: natureFiles },
+        'anti-defensive': { headSha: 'd1'.padEnd(40, '0'), files: antiFiles },
+      },
+      failures: [],
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+    await service.installSkills()
+
+    // 只有反防御源换了一个新技能，nature 源一字未动
+    const anti2 = { ...antiFiles, 'anti-defensive-writing-en/SKILL.md': 'c'.repeat(40) }
+    service.fetchAllSources = async () => ({
+      files: { ...natureFiles, ...anti2 },
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd2'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: natureFiles },
+        'anti-defensive': { headSha: 'd2'.padEnd(40, '0'), files: anti2 },
+      },
+      failures: [],
+    })
+
+    const checked = await service.check()
+    assert.equal(checked.updateAvailable, true, '反防御源新增技能必须被检测到')
+    assert.deepEqual(checked.changedSkills.map((r) => r.name), ['anti-defensive-writing-en'])
+    // 关键：check 只报告、不快进基线 —— 基线仍是上次同步到的 sha。
+    // 快进的话就等于"假装已经更新完"，用户点更新时会发现没东西可更。
+    assert.equal(checked.sources.find((s) => s.id === 'nature').headSha, 'n1'.padEnd(40, '0'))
+    assert.equal(checked.sources.find((s) => s.id === 'anti-defensive').headSha, 'd1'.padEnd(40, '0'),
+      'anti-defensive 的基线不该被 check 快进到 d2')
+    // 远端的最新 sha 通过 sourceErrors 之外的另一条路体现：changedSkills 已经指出变了哪个。
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('多源: 上游删掉反防御技能时不删本地目录，但要如实上报', async () => {
+  const { mkdtemp, rm, readdir } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-multi-remove-'))
+  try {
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    const antiFiles = { 'anti-defensive-writing/SKILL.md': 'b'.repeat(40) }
+    const natureFiles0 = { 'nature-figure/SKILL.md': 'a'.repeat(40) }
+    service.fetchAllSources = async () => ({
+      files: { ...natureFiles0, ...antiFiles },
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd1'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: natureFiles0 },
+        'anti-defensive': { headSha: 'd1'.padEnd(40, '0'), files: antiFiles },
+      },
+      failures: [],
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+    await service.installSkills()
+
+    // 上游把反防御技能整个删了 —— 但 nature 源还有技能。
+    // （不能两个源都返回空树：那是 learnRoster 明确防守的"异常快照"场景，
+    //   空树会被当成网络故障而不动 roster，见 learnRoster 的安全边界注释。）
+    const natureFiles = { 'nature-figure/SKILL.md': 'a'.repeat(40) }
+    service.fetchAllSources = async () => ({
+      files: { ...natureFiles },
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd2'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: natureFiles },
+        'anti-defensive': { headSha: 'd2'.padEnd(40, '0'), files: {} },
+      },
+      failures: [],
+    })
+    const checked = await service.check()
+    assert.ok(checked.rosterRemoved.includes('anti-defensive-writing'),
+      '上游删除必须如实上报，实际：' + JSON.stringify(checked.rosterRemoved.slice(0, 8)))
+    const dirs = await readdir(join(home, 'skills'))
+    assert.ok(dirs.includes('anti-defensive-writing'), '不能擅自删用户已有的目录')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('多源: 一个源拉取失败不拖垮另一个源（部分失败可容忍）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-multi-partial-'))
+  try {
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    service.fetchAllSources = async () => ({
+      files: { 'nature-figure/SKILL.md': 'a'.repeat(40) },
+      heads: { nature: 'n1'.padEnd(40, '0') },
+      perSource: { nature: { headSha: 'n1'.padEnd(40, '0'), files: { 'nature-figure/SKILL.md': 'a'.repeat(40) } } },
+      failures: [{ source: 'anti-defensive', repo: 'Adkid-Zephyr/anti-defensive-writing-Skill', message: 'HTTP 404' }],
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+    const res = await service.installSkills()
+    assert.equal(res.outcome.ok, true, '一个源挂了，另一个源照样装成功')
+    assert.deepEqual(res.outcome.installed, ['nature-figure'])
+    // 失败要如实暴露在状态里，而不是假装没事
+    assert.equal(res.sourceErrors.length, 1)
+    assert.equal(res.sourceErrors[0].source, 'anti-defensive')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 下载回退：直连不通时必须自动换镜像（真实端到端暴露的缺口）─────────────────
+// 2026-11-05 实测：raw.githubusercontent.com 对两个上游仓库都 ECONNRESET，
+// 而 ghproxy.net 同路径 200。单前缀 = 网络一抖，26 个技能一个都装不上。
+test('下载回退: 直连失败自动换镜像，且内容仍按 blob sha 校验', async () => {
+  const { mkdtemp, rm, readFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { createHash } = await import('node:crypto')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-fallback-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    const body = Buffer.from('---\nname: anti-defensive-writing\n---\n')
+    const sha = createHash('sha1').update('blob ' + body.length + '\0').update(body).digest('hex')
+    mockRemote(service, { headSha: 'a'.repeat(40), files: { 'anti-defensive-writing/SKILL.md': sha } })
+
+    // 记录被尝试的顺序：直连必须失败，镜像必须成功。
+    const tried = []
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async (url, init) => {
+      tried.push(String(url))
+      if (String(url).startsWith('https://raw.githubusercontent.com')) {
+        // 模拟 ECONNRESET
+        const error = new Error('fetch failed')
+        error.cause = { code: 'ECONNRESET' }
+        throw error
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        async arrayBuffer() { return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) },
+      }
+    }
+    try {
+      const res = await service.installSkills(['anti-defensive-writing'])
+      assert.equal(res.outcome.ok, true, '镜像可用时安装必须成功，失败详情：' + JSON.stringify(res.outcome.failures))
+      assert.deepEqual(res.outcome.installed, ['anti-defensive-writing'])
+      assert.equal(await readFile(join(skills, 'anti-defensive-writing', 'SKILL.md'), 'utf8'),
+        body.toString('utf8'), '落盘内容必须与远端一致')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    assert.ok(tried.some((u) => u.startsWith('https://raw.githubusercontent.com')), '必须先试直连')
+    assert.ok(tried.some((u) => u.includes('ghproxy.net')), '直连失败后必须试镜像，实际：' + JSON.stringify(tried))
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('下载回退: 镜像返回错误内容（sha 不符）时不许写盘，报出全部路由失败原因', async () => {
+  const { mkdtemp, rm, readdir } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-badtamper-'))
+  const skills = join(home, 'skills')
+  try {
+    let service
+    mod.apply({ logger: { warn() {} } , provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+    mockRemote(service, { headSha: 'a'.repeat(40), files: { 'anti-defensive-writing/SKILL.md': 'f'.repeat(40) } })
+
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      // 每个路由都返回同样的错误页面 —— sha 永远对不上
+      async arrayBuffer() { const b = Buffer.from('<html>blocked</html>'); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) },
+    })
+    try {
+      const res = await service.installSkills(['anti-defensive-writing'])
+      assert.equal(res.outcome.ok, false, '内容不对绝不能报成功')
+      const msg = JSON.stringify(res.outcome.failures)
+      assert.match(msg, /blob sha mismatch/, '必须点明是内容校验失败，而不是含糊的网络错误')
+      // 绝不能把错误页当成技能文件写进用户目录
+      const dirs = await readdir(skills).catch(() => [])
+      assert.deepEqual(dirs, [], '校验失败时一个字节都不该落盘')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归：只装了第二个源的技能时，update() 的门闸不能误判 ──────────────────────
+// 多源改造引入过一个 P1：顶层 manifest 只镜像主源（nature）。只装反防御技能时，
+// 主源一个都没装 → 镜像出来的 files 是空 → needsBaseline() 恒真 → update()
+// 永远拒绝动手，用户点「更新」毫无反应。
+// 真实网络端到端跑出来的（2026-11-05）：installSkills(['anti-defensive-writing'])
+// 成功后 manifest.files 仍是 0。
+test('多源: 只装反防御技能后，顶层 manifest 必须包含它们的基线（update 门闸不能误判）', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-union-'))
+  try {
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: join(home, 'skills'), autoCheck: false })
+
+    // 只给反防御源技能，nature 源一个都没有
+    service.fetchAllSources = async () => ({
+      files: { 'anti-defensive-writing/SKILL.md': 'b'.repeat(40) },
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd1'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: {} },
+        'anti-defensive': { headSha: 'd1'.padEnd(40, '0'), files: { 'anti-defensive-writing/SKILL.md': 'b'.repeat(40) } },
+      },
+      failures: [],
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+
+    const installed = await service.installSkills(['anti-defensive-writing'])
+    assert.deepEqual(installed.outcome.installed, ['anti-defensive-writing'])
+    // 顶层 manifest 是各源基线的并集：反防御的条目必须真的在里面。
+    assert.equal(Object.keys(installed.manifest.files).length, 1,
+      '顶层 manifest 必须含反防御源的基线，实际 ' + JSON.stringify(installed.manifest.files))
+
+    // 关键断言：update() 能通过基线门闸（不再返回 baseline-missing）。
+    const updated = await service.update([])
+    assert.notEqual(updated.outcome.reason, 'baseline-missing',
+      'update() 不能被误判成缺基线，实际 reason=' + updated.outcome.reason)
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+// ── 回归：技能早已装好（无基线）时，check/update 必须能用 ──────────────────────
+// 用户最常见的处境：技能本来就在磁盘上（手工拷贝 / 旧版插件 / 别的工具），
+// 装上本插件后只想「检查更新」。
+// 旧行为：needsBaseline 要求顶层 manifest.headSha 非空，而多源下顶层 headSha
+// 镜像主源 —— 只装反防御技能时主源没装东西 → headSha=null → needsBaseline 恒真
+// → 状态永远 baseline-missing → update() 永远拒绝动手（用户以为更新坏了）。
+// 2026-11-05 真实场景实测。
+test('回归: 技能已装好且无基线时，check 自动补基线、update 不再被拒', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-adopt-'))
+  const skills = join(home, 'skills')
+  try {
+    // 磁盘上先有两个反防御技能（模拟"早已装好"）
+    for (const name of ['anti-defensive-writing', 'anti-defensive-writing-en']) {
+      await mkdir(join(skills, name), { recursive: true })
+      await writeFile(join(skills, name, 'SKILL.md'), '---\nname: ' + name + '\n---\n')
+    }
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    await service.setConfig({ targetDir: skills, autoCheck: false })
+
+    const files = {
+      'anti-defensive-writing/SKILL.md': 'a'.repeat(40),
+      'anti-defensive-writing-en/SKILL.md': 'b'.repeat(40),
+    }
+    service.fetchAllSources = async () => ({
+      files,
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd1'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: {} },
+        'anti-defensive': { headSha: 'd1'.padEnd(40, '0'), files },
+      },
+      failures: [],
+    })
+    service.downloadBlob = async () => Buffer.from('---\nname: x\n---\n')
+
+    const checked = await service.check()
+    assert.equal(checked.lastCheckStatus, 'upToDate',
+      '已装的技能应被采纳为基线，状态不该停在 baseline-missing，实际 ' + checked.lastCheckStatus)
+    assert.equal(Object.keys(checked.manifest.files).length, 2, '基线应含这两个已装技能')
+    // 顶层 headSha 仍是主源的 null（主源一个都没装），但基线判断不该被它卡住。
+    assert.equal(checked.sources.find((s) => s.id === 'anti-defensive').baselineSha, 'd1'.padEnd(40, '0'))
+
+    const updated = await service.update(['anti-defensive-writing'])
+    assert.notEqual(updated.outcome.reason, 'baseline-missing',
+      'update() 不能被误判成缺基线，实际 reason=' + updated.outcome.reason)
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('needsBaseline: 只凭文件清单判定，headSha 为空但有清单时不算缺基线', () => {
+  // 直接测纯函数语义（它是 update/check 门闸的核心）。
+  // 这里有清单没 headSha = 多源下主源没装技能，但副源清单是好的。
+  const mod = require_needsBaseline()
+  assert.equal(mod({ headSha: null, files: { 'a/SKILL.md': 'x' } }), false,
+    '有清单就不算缺基线，哪怕顶层 headSha 是 null')
+  assert.equal(mod({ headSha: 'a'.repeat(40), files: {} }), true, '空清单 = 缺基线')
+  assert.equal(mod(null), true)
+  assert.equal(mod(undefined), true)
+
+  function require_needsBaseline() {
+    // needsBaseline 未导出：从源码抽出来真跑。
+    const src = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+    const m = /function needsBaseline\(manifest\) \{[\s\S]*?\n\}/.exec(src)
+    assert.ok(m, 'needsBaseline 找不到')
+    return new Function('isPlainObject', 'return ' + m[0].replace('function needsBaseline(manifest) {', 'function needsBaseline(manifest) {'))(
+      (v) => v !== null && typeof v === 'object' && !Array.isArray(v),
+    )
   }
 })

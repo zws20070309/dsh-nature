@@ -35,6 +35,7 @@
                 - Pre-submission self-review -> nature-reviewer (produces review reports only, never a rebuttal). Decision-letter response -> nature-response (never doubles as mock review; the decision-type gate is mandatory).
                 - Delivery: nature-paper2word (Word) / nature-paper2ppt (talk deck) / nature-paper-to-patent (patent draft). Topic argumentation runs nature-social-science then researchwrite (directory nature-proposal-writer; the frontmatter trigger name is researchwrite). Daily literature discovery -> nature-literature-pipeline.
                 - nature-shared is a shared reference library: load only the specific file another skill asks for, never invoke it standalone.
+                - Anti-defensive writing (second upstream repo, installed alongside the nature set): anti-defensive-writing (Chinese edition) / anti-defensive-writing-en (English edition). Load it for ANY drafting, revision, compression, abstract/intro/conclusion writing, experiment organization, rebuttal, or "this reads AI-ish / I feel defensive" moment. It is orthogonal to the drafting skills: nature-writing builds the argument, anti-defensive-writing keeps that argument from apologizing for itself. Apply it as a lens across the whole lifecycle, not as a one-shot pass.
 
                 NON-NEGOTIABLE RULES:
                 - Missing evidence is written as AUTHOR_INPUT_NEEDED with an explicit Assumptions list. Never fabricate references, data, page numbers or line numbers.

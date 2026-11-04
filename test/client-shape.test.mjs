@@ -205,12 +205,16 @@ test('PLUGIN_VERSION 与 package.json version 同步', () => {
 })
 
 // ── 技能目录：24 项，每项都有双语一句话定位，字典键与目录一一对应 ────────────────
-test('catalog: 24 个技能、skill.* 文案与目录一一对应', () => {
+test('catalog: 技能目录与 skill.* 文案一一对应（nature 24 + 反防御 2）', () => {
   const catalogMatch = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(source)
   assert.ok(catalogMatch, 'CATALOG 找不到')
-  const names = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].map((m) => m[1])
-  assert.equal(names.length, 24, '目录必须是 24 项，当前 ' + names.length)
-  assert.equal(new Set(names).size, 24, '技能名不许重复')
+  // 目录现在跨两个上游源：nature-* 与 anti-defensive-*，两种前缀都要收。
+  const names = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+|anti-defensive-writing[a-z-]*)'/g)].map((m) => m[1])
+  assert.equal(names.length, 26, '目录必须是 26 项（24 nature + 2 反防御），当前 ' + names.length)
+  assert.equal(new Set(names).size, 26, '技能名不许重复')
+  for (const required of ['anti-defensive-writing', 'anti-defensive-writing-en']) {
+    assert.ok(names.includes(required), '目录必须包含反防御技能：' + required)
+  }
   for (const name of names) {
     assert.ok(dict.zh['skill.' + name], '缺 zh 一句话定位：' + name)
     assert.ok(dict.en['skill.' + name], '缺 en 一句话定位：' + name)
@@ -313,7 +317,7 @@ test('catalog: 目录名与触发名不一致的技能有别名标注', () => {
     'nature-proposal-writer 的触发名是 researchwrite')
 
   const catalogMatch = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(source)
-  const names = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].map((m) => m[1])
+  const names = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+|anti-defensive-writing[a-z-]*)'/g)].map((m) => m[1])
   for (const key of Object.keys(TRIGGER_ALIAS_KEYS_FROM(aliasMatch[1]))) {
     assert.ok(names.includes(key), '别名键必须真的在目录里：' + key)
   }
@@ -364,7 +368,7 @@ function buildStatusView(hub) {
   const statusView = pick(/function statusView\(raw\) \{[\s\S]*?\n    \}/, 'statusView')
   const catalogMatch = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(source)
   assert.ok(catalogMatch, 'CATALOG 找不到')
-  const total = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].length
+  const total = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+|anti-defensive-writing[a-z-]*)'/g)].length
   const body = installationView + '\n' +
     statusView.replace('function statusView(raw) {', 'return function statusView(raw) {')
   // 真 hub：让 statusView 的广播真的发得出去，测试才能断言「状态一变红点就跟着变」。
@@ -422,7 +426,7 @@ function buildInstallationView() {
   const m = /function installationView\(raw\) \{[\s\S]*?\n    \}/.exec(source)
   assert.ok(m, 'installationView 找不到')
   const catalogMatch = /const CATALOG = \[([\s\S]*?)\n    \]/.exec(source)
-  const total = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].length
+  const total = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+|anti-defensive-writing[a-z-]*)'/g)].length
   return new Function('CATALOG_TOTAL',
     m[0].replace('function installationView(raw) {', 'return function installationView(raw) {'))(total)
 }

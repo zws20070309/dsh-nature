@@ -1,12 +1,8 @@
 {
-  "meta": {
-    "title": "Nature Academic Writing",
-    "description": "Nature academic-writing suite: a nature agent preset (PTC base + 24 nature-skills) plus a DSH plugin providing a workbench, a settings page and an incremental nature-skills update center with red-dot badges."
-  },
   "nav": "Nature Writing",
-  "banner.update": "nature-skills has updates available",
-  "banner.notInstalled": "No nature skills detected — open the Nature Writing workbench to install the full set",
-  "banner.partialInstalled": "Partial nature skills detected ({have}/{total}, {miss} missing) — top up from the workbench",
+  "banner.update": "Skills have updates available",
+  "banner.notInstalled": "No skills detected — open the Nature Writing workbench to install the full set",
+  "banner.partialInstalled": "Partial skills detected ({have}/{total}, {miss} missing) — top up from the workbench",
   "banner.needsBaseline": "No baseline yet: run tools/baseline.cjs inside the nature-skills clone, then click \"Check for updates\" here",
   "banner.error": "Failed to load status: {message}",
   "status.pluginVersion": "Plugin",
@@ -33,15 +29,15 @@
   "updates.resultPartial": "Updated {done} skills, {failed} files failed (see logs)",
   "catalog.title": "Skill catalog",
   "catalog.count": "{n} skills",
-  "catalog.hint": "24 skills shipped with the nature-skills repo; describe the task in a session and the matching skill triggers.",
+  "catalog.hint": "These skills come from two upstream repos (nature-skills and anti-defensive-writing) and update incrementally; describe the task in a session and the matching skill triggers.",
   "catalog.triggerHint": "This skill registers the trigger name {trigger} in SKILL.md (directory name differs)",
   "install.title": "Skill installation",
   "install.unknown": "Reading installation state… if this never resolves, the host service is not ready — restart DSH.",
   "install.diagMountFailed": "Remote channel mount failed: {message}",
   "install.diagNoNamespace": "Remote channel mounted but the namespace never appeared. Please send this line to the author.",
   "install.progress": "{have}/{total} installed",
-  "install.complete": "All {n} nature skills are ready",
-  "install.empty": "No nature skills detected",
+  "install.complete": "All {n} skills are ready",
+  "install.empty": "No skills detected",
   "install.emptyHint": "None of the nature skills are present, so none of the writing, literature, statistics or figure workflows can trigger. Install the full set below.",
   "install.partialShort": "Partial nature skills detected: {have}/{total} present, {miss} missing",
   "install.partialHint": "Install only the {n} missing skills, or refresh every skill to the latest remote version. Existing skills are left untouched by a top-up.",
@@ -110,5 +106,14 @@
   "skill.nature-paper-to-patent": "Paper to Chinese patent draft or technical disclosure, evidence-anchored",
   "skill.nature-reviewer": "Three mutually blinded mock reviews plus one synthesis, with a forensic consistency audit",
   "skill.nature-response": "Decision-letter parsing into point-by-point replies, cover letter, redlined manuscript and LaTeX package",
-  "skill.nature-shared": "Internal shared reference library (never invoked standalone): writing axioms, corpus rules, journal formats"
+  "skill.nature-shared": "Internal shared reference library (never invoked standalone): writing axioms, corpus rules, journal formats",
+  "group.defense": "Anti-defensive writing",
+  "skill.anti-defensive-writing": "Stop defensive writing (Chinese edition): treat the paper as a press conference — never volunteer weakness, never write an experiment diary, never attack the paper for the reviewer",
+  "skill.anti-defensive-writing-en": "Stop defensive writing (English edition): the press-release principle for the whole paper lifecycle",
+  "sources.skillCount": "{n} skills",
+  "sources.failed": "These skill sources could not be fetched (their skills were not checked): {detail}",
+  "meta": {
+    "title": "Nature Academic Writing",
+    "description": "Nature academic-writing suite: a nature agent preset (PTC base + 24 nature-skills) plus a DSH plugin providing a workbench, a settings page and an incremental nature-skills update center with red-dot badges."
+  }
 }
