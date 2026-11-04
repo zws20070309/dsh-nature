@@ -440,3 +440,36 @@ test('红点（真渲染）：组件卸载后不再收到广播（订阅已退�
   // 卸载后树不复存在，不该抛错；这里主要断言「卸载流程跑完了没有炸」。
   assert.equal(before, null, '卸载后不应再持有渲染树')
 })
+
+// ── 边界：BundleCard 收到广播后重读，不许形成自我循环 ──────────────────────────
+// BundleCard 订阅 dotHub 后会调 refresh() → statusView() → publishDot()。
+// publishDot 自带「结论没变就不广播」的去重，所以这条路不会自激。
+// 若哪天去掉去重，这里会因为 status() 调用次数爆炸而变红。
+test('红点（真渲染）：BundleCard 的重读不会自激', async () => {
+  const host = { updateAvailable: true }
+  const { mini, slots, namespace } = await boot(host)
+  let calls = 0
+  const originalStatus = namespace.status
+  namespace.status = async () => { calls += 1; return originalStatus() }
+
+  const api = slots['sidebar.panellist'].options.inject().api
+  mini.mount(slots['plugins.bundle.config'].component, { api })
+  await tick(120)
+  mini.flush()
+  const settled = calls
+
+  // 再等一轮：如果自激，coals 会持续增长。
+  await tick(200)
+  mini.flush()
+  assert.equal(calls, settled, 'status() 调用次数必须收敛（publishDot 去重生效），实际 ' + calls)
+
+  // 挂上工作台制造一次真实结论翻转，BundleCard 应当只多读一次，然后重新收敛。
+  mini.mount(slots['main'].component, { api })
+  await tick(120)
+  mini.flush()
+  const afterMount = calls
+  await tick(200)
+  mini.flush()
+  assert.equal(calls, afterMount, '结论翻转后也必须重新收敛')
+  mini.unmount()
+})
