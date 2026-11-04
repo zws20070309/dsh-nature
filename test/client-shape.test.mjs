@@ -352,9 +352,9 @@ test('apply: 样式、文案、Remote 挂载三段各自兜底，$mount 失败�
   )
 })
 
-// statusView 现在依赖 installationView 与 CATALOG_TOTAL，必须一起求值：
-// 只抽 statusView 一个函数体会在 new Function 里 ReferenceError。
-function buildStatusView() {
+// statusView 现在依赖 installationView、CATALOG_TOTAL 与 publishDot（红点广播），
+// 三者必须一起求值；只抽一个函数体会在 new Function 里 ReferenceError。
+function buildStatusView(hub) {
   const pick = (re, label) => {
     const m = re.exec(source)
     assert.ok(m, '找不到：' + label)
@@ -367,7 +367,26 @@ function buildStatusView() {
   const total = [...catalogMatch[1].matchAll(/'(nature-[a-z0-9-]+)'/g)].length
   const body = installationView + '\n' +
     statusView.replace('function statusView(raw) {', 'return function statusView(raw) {')
-  return new Function('PLUGIN_VERSION', 'CATALOG_TOTAL', body)(pkg.version, total)
+  // 真 hub：让 statusView 的广播真的发得出去，测试才能断言「状态一变红点就跟着变」。
+  // 传 hub 进来是为了让调用方能对**同一个** hub 订阅（各自 new 一个就测不到接线）。
+  const dots = hub === undefined ? buildDotHub() : hub
+  return new Function('PLUGIN_VERSION', 'CATALOG_TOTAL', 'publishDot', body)(
+    pkg.version, total, dots.publishDot)
+}
+
+/** 从源码抽出 dotHub / publishDot / subscribeDot 并真的执行 —— 广播语义必须真跑一遍。 */
+function buildDotHub() {
+  const pick = (re, label) => {
+    const m = re.exec(source)
+    assert.ok(m, '找不到：' + label)
+    return m[0]
+  }
+  const hub = pick(/const dotHub = \{[\s\S]*?\n    \}/, 'dotHub')
+  const publish = pick(/function publishDot\(view, raw\) \{[\s\S]*?\n    \}/, 'publishDot')
+  const subscribe = pick(/function subscribeDot\(listener\) \{[\s\S]*?\n    \}/, 'subscribeDot')
+  const body = hub + '\n' +
+    'return { publishDot: ' + publish + ', subscribeDot: ' + subscribe + ', hub: dotHub }\n'
+  return new Function('warn', body)(() => {})
 }
 
 // ── 回归：拿不到宿主状态时，绝不能把"读不到"渲染成"0 个已安装" ──────────────────
@@ -552,4 +571,81 @@ test('statusView: 透传宿主的 roster 供目录渲染', () => {
   assert.deepEqual(view.roster, ['nature-a', 'nature-b'])
   // 坏形状被清洗成空数组，不是 undefined
   assert.deepEqual(statusView({ roster: 'nope' }).roster, [])
+})
+
+// ── 回归（P0，实机截图）：更新完成后侧栏蓝点必须立刻灭 ───────────────────────────
+// 2026-11-04 22:12 用户实测：工作台已显示「全套 24 个就绪 / 没有待更新的技能」，
+// 宿主状态文件里 updateAvailable 也已经是 false，可侧栏图标右上角的蓝点还亮着。
+// 根因：红点是**三份互不知情的副本**（PanelIcon / DetailBadge / BundleCard），
+// 各自挂载时读一次 status()，之后只靠 10 分钟轮询；工作台点完更新，
+// 自己 onRefresh 立刻变了脸，侧栏那份副本还在睡。
+// 修法：statusView() 每拿到一次真实宿主状态就广播给所有订阅者（dotHub）。
+test('红点：面板拿到新状态后，侧栏结论立刻同拍（不等轮询）', () => {
+  const { publishDot, subscribeDot, hub } = buildDotHub()
+  const seen = []
+  const off = subscribeDot((next) => seen.push(next))
+
+  // 一开始没有更新 → 红点灭（初值 false，不广播）。
+  assert.equal(hub.value, false)
+  assert.deepEqual(seen, [], '结论没变化时不该打扰订阅者')
+
+  // 宿主报告有更新 → 红点亮，订阅者立刻收到 true。
+  publishDot({ updateAvailable: true }, { updateAvailable: true })
+  assert.equal(hub.value, true)
+  assert.deepEqual(seen, [true], '有更新必须立刻广播')
+
+  // 用户点「全部更新」→ 宿主回 updateAvailable:false → 红点必须立刻灭。
+  // 这就是用户截图里没被满足的那一步。
+  publishDot({ updateAvailable: false }, { updateAvailable: false })
+  assert.equal(hub.value, false, '更新完成后红点必须灭')
+  assert.deepEqual(seen, [true, false], '灭红点也必须广播，否则侧栏那一份副本会一直亮着')
+
+  // 退订之后不再推送（组件卸载后还在 setState 会告警）。
+  off()
+  publishDot({ updateAvailable: true }, { updateAvailable: true })
+  assert.deepEqual(seen, [true, false], '退订后不该再收到广播')
+})
+
+test('红点：未知态（宿主还没读到）不许误灭或误亮', () => {
+  const { publishDot, subscribeDot, hub } = buildDotHub()
+  const seen = []
+  subscribeDot((next) => seen.push(next))
+
+  publishDot({ updateAvailable: true }, { updateAvailable: true })
+  assert.deepEqual(seen, [true])
+
+  // statusView(null) 是「宿主未就绪」，不是「没有更新」——\r
+  // 若把它当成 false 广播，任何面板的首屏未知态都会把刚点亮的红点误灭。
+  publishDot({ updateAvailable: false }, null)
+  assert.equal(hub.value, true, '未知态不该改变红点结论')
+  assert.deepEqual(seen, [true])
+  publishDot({ updateAvailable: false }, undefined)
+  assert.equal(hub.value, true, 'undefined 同样不算结论')
+})
+
+test('红点：statusView 真的会广播（接线不是摆设）', () => {
+  const dots = buildDotHub()
+  // buildStatusView 用的必须是**同一个** hub，否则测到的是两份独立副本。
+  const statusView = buildStatusView(dots)
+  const { subscribeDot, hub } = dots
+  const seen = []
+  subscribeDot((next) => seen.push(next))
+
+  const base = {
+    version: 1, headSha: 'b'.repeat(40), lastCheckedAt: '2026-11-04T14:12:22.000Z',
+    lastCheckStatus: 'upToDate', lastError: null, updateAvailable: false,
+    changedSkills: [], manifest: { headSha: 'b'.repeat(40), files: { 'x/SKILL.md': 'y' } },
+    config: { autoCheck: true, intervalHours: 6, targetDir: 'C:/skills', mirror: '' },
+  }
+  // 先制造「有更新」：hub 初值 false，广播一次 true。
+  const withUpdate = statusView({ ...base, updateAvailable: true, lastCheckStatus: 'updateAvailable',
+    changedSkills: [{ name: 'nature-figure', added: 1, removed: 0, modified: 0 }] })
+  assert.equal(withUpdate.updateAvailable, true)
+  assert.equal(hub.value, true, 'statusView 必须把结论推给 dotHub')
+
+  // 更新完成后的状态：红点必须跟着灭。
+  const afterUpdate = statusView(base)
+  assert.equal(afterUpdate.updateAvailable, false)
+  assert.equal(hub.value, false, '拿到 updateAvailable:false 后 dotHub 必须同步为 false')
+  assert.deepEqual(seen, [true, false], '两次结论变化都要广播到订阅者')
 })

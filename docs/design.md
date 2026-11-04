@@ -76,6 +76,12 @@ dsh-nature/
 
 - RPC：CONTRIBUTION descriptors（status/check/update/setConfig/openSkillsDir）→ `ctx.remote.$mount(CONTRIBUTION)` → `ctx.get('remote.dshNature')`。
 - 状态刷新：面板挂载即 status() + 动作后刷 + 卸载清理的 setInterval(10min) 轮询（图标红点保鲜）。
+- 红点同步（v1.1.1）：`statusView()` 每拿到一次真实宿主状态就向模块级 `dotHub` 广播结论，
+  侧栏图标 / 插件详情徽标 / 插件管理器状态卡共同订阅。**不接受「红点是几份各自轮询的副本」**：
+  那样在工作台点完「全部更新」后，工作台自己变了脸、侧栏蓝点却要等 10 分钟才灭
+  （2026-11-04 22:12 用户实测截图，宿主 `updateAvailable` 已是 false，蓝点仍亮）。
+  `statusView(null)` 表示宿主未就绪而非「没有更新」，不参与广播 —— 否则任何面板首屏的
+  未知态都会把已亮的红点误灭。回归测试见 `test/reddot.test.mjs`（迷你 React 真渲染）。
 - i18n：`locale/{zh,en}.json` + `ctx.locale.register(NS, dict)` + `ctx.locale.bind(NS)`；样式内联 `<style>` 注入 + 仅用 `--dsw-*`/`--dsw-alias-*` 主题 token（亮暗双主题兼容）。
 - 徽标克制原则（providers-hub 教训）：失败静默降级 + 状态行明示，不弹窗轰炸。
 
