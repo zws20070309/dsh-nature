@@ -311,6 +311,30 @@ test('P1-5 重启后每源归属不退回内置清单（源行不报假技能数
   }
 })
 
+// ── 零差异快进：head 动了但 skills/ 内容没变 ─────────────────────────────────
+test('零差异快进：只推进 head，不重建基线清单、不删文件、不点亮红点', async () => {
+  const { home, skills, service, remote } = await setup()
+  try {
+    remote.state.nature.files = { 'nature-a/SKILL.md': 'a'.repeat(40) }
+    await service.installSkills()
+    const baselineFiles = JSON.stringify((await service.status()).manifest.files)
+
+    // 上游推了一个只动 README 的提交：head 变了，skills/ 一个字节没变。
+    remote.state.nature.head = 'n2'.padEnd(40, '0')
+    const checked = await service.check()
+
+    assert.equal(JSON.stringify(checked.manifest.files), baselineFiles, '内容没变，基线清单就不该变')
+    assert.equal(checked.manifest.headSha, 'n2'.padEnd(40, '0'), '基线 head 必须前进（否则每次检查都重拉整棵树）')
+    // headSha 与 manifest.headSha 必须同步：只动一个会让「远端版本」与「基线版本」无端分叉。
+    assert.equal(checked.sources.find((row) => row.id === 'nature').headSha, 'n2'.padEnd(40, '0'))
+    assert.equal(checked.updateAvailable, false)
+    assert.equal(checked.changedSkills.length, 0)
+    assert.ok((await readdir(skills)).includes('nature-a'), '零差异分支不许删文件')
+  } finally {
+    await teardown(home)
+  }
+})
+
 // ── 归属自愈：老状态文件（没有 sourceOf）也要让源行说得清 ──────────────────────
 test('归属自愈：老状态文件加载后源行有归属，不显示 0 个技能', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-nature-life-legacy-'))
