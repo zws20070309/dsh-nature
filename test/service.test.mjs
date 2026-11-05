@@ -338,7 +338,11 @@ test('install(): 无基线时仍能走完并回完整状态 + outcome', async ()
     assert.deepEqual(result.outcome.installed, ['nature-figure'], '远端只有这一个 → 只装它')
     // 关键：install 之后必须真的可被发现（安装快照重扫过）
     assert.deepEqual(result.installation.installed, ['nature-figure'])
-    // roster 现在学自远端：远端只有这 1 个技能，装完就是「全套齐全」。    // （旧行为把内置 24 项当权威，装 1 个永远 complete=false —— 那正是    //   「上游变成 25 个就发现不了」的同一个病根。）    assert.equal(result.installation.total, 1, '权威清单应等于远端实际技能数')    assert.equal(result.installation.complete, true)
+    // roster 现在学自远端：远端只有这 1 个技能，装完就是「全套齐全」。
+    // （旧行为把内置 24 项当权威，装 1 个永远 complete=false —— 那正是
+    //   「上游变成 25 个就发现不了」的同一个病根。）
+    assert.equal(result.installation.total, 1, '权威清单应等于远端实际技能数')
+    assert.equal(result.installation.complete, true)
     // 基线被快进（否则用户永远停在"未建立基线"）
     assert.equal(result.manifest.headSha, 'a'.repeat(40))
   } finally {

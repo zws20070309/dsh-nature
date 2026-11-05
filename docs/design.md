@@ -205,3 +205,146 @@ DSH 的技能名取 SKILL.md 的 frontmatter `name`（`dsh-skill-filesystem` 的
 原人格中英混排。预设注入应与官方 `ptc` 同语言（英文）。改为纯英文后：
 3615 字符、0 个中文字符（脚本校验），路由规则/语言策略/铁律全部保留。
 中文只保留在技能目录文案与用户可见 UI，不进提示词。
+
+## 8. 多源架构（v1.2.0）
+
+插件管两套技能，装进**同一个** targetDir，由同一套检测/安装/更新引擎管理：
+
+| 源 id | 仓库 | 技能 |
+|---|---|---|
+| `nature` | Yuan1z0825/nature-skills | 24 个 nature-* |
+| `anti-defensive` | Adkid-Zephyr/anti-defensive-writing-Skill | anti-defensive-writing / -en |
+
+状态文件新增 `sources: { [id]: { headSha, manifest } }`，每个源有自己的基线；
+顶层 `headSha` 镜像主源（保持单源时代的字段语义），顶层 `manifest.files` 是各源的**并集**
+（`needsBaseline` 判的是它非空，只镜像主源会让「只装了反防御技能」的用户永久卡在 baseline-missing）。
+`sourceOf: { [id]: string[] }` 是持久化的技能归属表；内存里的 `this.sourceOf` 是它的索引。
+
+## 9. 1.3.0 修复记录（逐条：现象 / 根因 / 修法 / 验证）
+
+> 背景：1.2.0 的 90 个测试全绿，但它们几乎全是**单轮**用例（调一次 install 或一次 check）。
+> 下面每一条都活在**多轮之间**，因此全部逃过了当时那套测试。
+> 修法都配了 `test/lifecycle.test.mjs` 的回归用例，并做过反向验证（还原修复 → 测试变红）。
+
+### 9.1 P0 源不可达时更新会删掉该源的本地技能
+
+**现象**：反防御源 ECONNRESET，用户点一次「更新」，`anti-defensive-writing` 整个目录被删除。
+**根因**：两个独立缺陷叠加。
+1. `learnRoster` 的防线是「**全局**远端树为空才不动 roster」；只要另一个源活着，全局树就非空，
+   于是 roster 被改写成只含健康源，失败源的技能从归属表里消失。
+2. `diffAllSources` 没有「这个源本轮没拉到」的概念，拿空集去 diff，该源每个文件都被判成
+   「远端已删除」，`syncSkill` 照做。
+**修法**：`fetchAllSources` 产出 `health: { [id]: 'ok' | 'empty' | 'unreachable' }`；
+`sourceActionable(health, id)` 只有 `ok` 才为真。不健康的源：不重算归属（保留已知）、
+不参与 diff、不参与基线推进、`install` 里如实记一条 failure 而不是「跳过」。
+「空树」独立成 `empty` 态并**当成异常**：真出现「上游把 skills/ 清空」的概率远低于
+「API 抖动 / prefix 改名 / 代理返回截断 JSON」，而这个判断决定要不要删用户的目录。
+**验证**：`P0-1 源 unreachable / empty` 两条 + 反向断言「上游**真的**删技能时仍然删」。
+
+### 9.2 P0 补装缺失技能会永久吞掉未安装的更新
+
+**现象**：上游改了 nature-writing；用户某个技能目录损坏，点「自动补全」；之后再点更新，
+`updated=[]`，磁盘还是旧内容，而且「检查」说「与远端一致」。
+**根因**：`runInstall` 无条件对每个源 `commitSource(source, head, remoteFiles)`，
+而 `baselineFor` 拿「已装技能 ∩ **远端** sha」造基线 —— 本轮根本没下载、远端却已经变了的技能
+被记成「已是最新」。
+**修法**：`commitSource(sourceId, headSha, allFiles, written)` 新增 `written: Map<path, sha>` 参数，
+基线只记**本轮真的写进磁盘**的路径；本轮没碰的技能保留旧条目。`runInstall` / `runUpdate` /
+`syncSkill` 都逐文件收集 `written`（`commitWrittenSources` 统一落盘）。
+**连带**：`runCheck` 原来用「headSha 相等 → 没有变化」短路，而基线现在会**先于内容**前进
+（补装一个技能后源 head 已前进、其它技能基线还停在旧 sha）→ 短路把残留的待更新藏起来，
+界面上的「全部更新」按钮变成禁用，那次更新在 UI 上再也够不到。改为始终按真实 diff 判定
+（树已在内存里，不额外发请求）。
+**验证**：`P0-2` 用例覆盖完整链路（补装 → 仍报有更新 → 更新到 v2）。
+
+### 9.3 P1 单个文件失败同样被基线吞掉
+
+**现象**：`scripts/audit.py` 下载失败（`ok=false, failures=1`），网络恢复后 `changedSkills=[]`，
+那个文件永远补不回来。
+**根因**：同 9.2 —— 基线记的是「远端该有什么」而不是「磁盘真有什么」。
+**修法**：同 9.2（`written` 只含成功的文件）。
+**验证**：`P1-3` + **基线不变量**用例（基线条目必须在磁盘上找得到对应文件，install/check/update 三处都查）。
+
+### 9.4 P1 `baseline-missing` 被当成「技能没装全」
+
+**现象**：只装 1/3 个技能时 `lastCheckStatus='baseline-missing'`，而 `manifest.files` 有 1 条，
+界面引导用户去跑 `tools/baseline.cjs`。
+**根因**：`runInstall` 里 `complete === false ? 'baseline-missing' : 'upToDate'`，
+把两条正交的轴（有没有基线 / 装没装全）混成一条。这正是 §6 之外 `runCheck` 已修过、
+但 `runInstall` 里原样活着的同一个病。
+**修法**：有基线就是 `upToDate`；缺技能由 `installation.complete/missing` 单独承载。
+**验证**：`P1-4`。
+
+### 9.5 P1 重启后 roster / 归属表丢失
+
+**现象**：上游新增第 27 个技能、用户还没装；重启 DSH 后 `roster` 掉回内置 26 个，
+`rosterAdded` 变空，安装态从「26/27 部分安装」跳成「26/26 全套就绪」，那个技能从目录里消失。
+**根因**：`persist()` 每次都在写 `roster` / `rosterAdded` / `rosterRemoved`，`status()` 每次都在返回它们，
+但 `load()` 一个字都不读 —— 写而不读等于白写。`installationOf(parsed.installation)` 还用了
+**内置清单**当过滤器，把磁盘上第 27 个已装技能丢掉。内存里的 `sourceOf` 同样不持久化，
+`status()` 只好退回内置兜底清单，源行报一个与磁盘无关的假数字。
+**修法**：`load()` 恢复 `roster` / `rosterUpdatedAt` / `rosterAdded` / `rosterRemoved` / `sourceOf` / `remoteHeads`；
+安装快照改用**恢复后的** roster 过滤；`status()` 的源行改为「归属未知就返回空数组 + `skillsKnown:false`」，
+不再退回内置清单。
+**验证**：`P1-5` 两条（重启后 roster/新增提示/计数；重启后归属不退回内置清单）。
+
+### 9.6 P1「远端版本」永远显示基线 sha
+
+**现象**：远端已经 bbbbbbb、`check` 报 `updateAvailable=true`，而状态头的「远端版本」显示 aaaaaaa ——
+与「基线版本」一模一样，这一行没有任何信息量。
+**根因**：`headSha` 只在 `commitSource` 里写（更新成功才前进），而 UI 的「远端版本」读的就是它。
+**修法**：新增 `state.remoteHeads: { [id]: sha }`，`check` 一拿到就记（`rememberRemoteHeads`）；
+`status()` 暴露 `remoteHeads` 与每源的 `remoteHeadSha`；客户端「远端版本」与源行都优先读它。
+`headSha` 保持历史语义 = 基线。
+**验证**：`P1-6`。
+
+### 9.7 P2 其余四项
+
+| 项 | 修法 | 验证 |
+|---|---|---|
+| 只勾选更新一部分后，已更新完的技能仍挂在待更新列表 | `runUpdate` 按 `written` 逐文件推进基线，再用推进后的基线重算剩余差异 | `P2-8` |
+| 故意只装子集时红点常亮 | `hasActionableChange` / `hasActionableRows`：只有「基线内的技能变了」或「上游新增」才点亮；缺技能交给 installation | `P2-10` |
+| `touched` 数组只 push 从不读（死代码） | 删除，改用磁盘重扫 + `written` | 现有 install 用例 |
+| `rosterAdded/rosterRemoved` 宿主算了但界面从不显示 | `InstallCard` 新增「上游新增 N 个技能」区块（复用「自动补全」按钮，不新增动作）；en/zh 各补 3 个键 | `client-shape` 键集断言 |
+
+### 9.8 一处能力缺口（不是 bug）
+
+上游**真的**把某个技能从仓库里删掉时，`sourceOfSkill` 曾经查不到它的归属（`learnRoster` 已按新树
+重算归属，那个名字随即消失），于是删除动作被跳过，用户目录里永远留着上游已不存在的东西。
+新增「从历史基线反查归属」的兜底：删掉的技能也找得到它属于哪个源。
+**验证**：`P0-1 上游**真的**删掉技能时仍然按语义删除`。
+
+### 9.9 零差异快进只推进 head（不再重建基线清单）
+
+`runCheck` 的分支「head 动了但 skills/ 内容零差异」原本会调 `commitSource(整源重建)`，
+而 `baselineFor` 依赖**当前安装快照** —— 如果此刻快照是陈旧的（扫描失败、刚换目录），
+就会凭空写出一份与磁盘不符的基线。既然这个分支的前提就是「内容没变」，清单就不该变。
+改成只推进 `headSha` / `manifest.headSha`（两者必须同步，否则「远端版本」与「基线版本」无端分叉）。
+**验证**：`零差异快进：只推进 head…`。
+
+### 9.9 归属表自愈（老状态文件不再报 0 个技能）
+
+`status()` 的源行改成「归属未知就返回空数组 + `skillsKnown:false`」之后，
+1.3.0 之前写的状态文件（没有 `sourceOf` 字段）会让源行显示 `0 个技能 / 未知`，
+直到用户下一次联网 check 才补上 —— 用户看不到任何错误，只看到一个奇怪的 0。
+**修法**：`load()` 末尾调 `adoptBuiltinOwnership()`，用「内置清单」补一份归属（只补缺的，
+已学到的不覆盖）。联网 check 之后仍以远端真实树为准，内置清单只是首屏的占位。
+**验证**：`归属自愈：老状态文件加载后源行有归属`。
+
+### 9.9 反向验证（防「测试只是跟着实现写」）
+
+| 还原的修复 | 变红的用例 |
+|---|---|
+| `diffAllSources` 去掉 health 门控 | `P0-1 源 unreachable` |
+| `commitSource` 改回整源重建 | `P0-2` / `P1-3` / `P2-8` / 基线不变量（4 条） |
+| `load()` 不恢复 roster | `P1-5 重启后 roster…` |
+
+还原后恢复原代码，102 条全部重新转绿。
+
+## 10. 已知取舍（1.3.0 新增）
+
+- **源不可达时不删本地文件**，代价是「上游把技能整仓删空」时需要人工清理。取舍依据：
+  误删用户文件不可恢复，多留一个目录随时可删。
+- **空树当成异常**：`skills/` 返回零文件时不产生任何删除。同上。
+- **红点语义收窄**为「你装的技能变了」。没装的技能由安装状态承载 —— 用户明确表达过
+  「我只想要反防御写作」，不该每次检查都被蓝点催。
