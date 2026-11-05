@@ -1232,3 +1232,143 @@ test('needsBaseline: 只凭文件清单判定，headSha 为空但有清单时不
     )
   }
 })
+
+// ── 回归（P1，实机踩到）：单源状态文件升级到多源时，不许把全部技能误报成新增 ────
+// 2026-11-05 重启 DSH 后真实复现：插件自己跑了一次 check，状态文件变成
+//   lastCheckStatus: 'updateAvailable'，changedSkills 26 条（每个技能都是 added）
+//   sources: { nature: {headSha:null, files:{}}, 'anti-defensive': {...} }
+// 根因：旧的单源状态文件里只有顶层 manifest（818 个文件），sources 是空对象。
+// 采纳逻辑只判 needsBaseline(顶层) —— 顶层非空 → 跳过采纳 → 逐源 diff 时
+// 每个源拿空基线去比完整远端树 → 全部「新增」。
+// 修法：采纳条件改成逐源判断（sourcesNeedBaseline），并把旧顶层 manifest
+// 迁移给主源复用。
+test('迁移: 旧单源状态文件不会把全部技能误报成新增', async () => {
+  const { mkdtemp, mkdir, writeFile, rm, readFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-migrate-'))
+  const skills = join(home, 'skills')
+  try {
+    // 磁盘上已装两个源的技能
+    for (const name of ['nature-figure', 'anti-defensive-writing']) {
+      await mkdir(join(skills, name), { recursive: true })
+      await writeFile(join(skills, name, 'SKILL.md'), '---\nname: ' + name + '\n---\n')
+    }
+
+    // 旧单源状态文件：顶层 manifest 有基线，**没有 sources 字段**
+    const legacy = {
+      version: 1,
+      headSha: 'o'.repeat(40),
+      lastCheckedAt: '2026-11-04T22:57:42.890Z',
+      lastCheckStatus: 'upToDate',
+      lastError: null,
+      updateAvailable: false,
+      changedSkills: [],
+      manifest: { headSha: 'o'.repeat(40), files: { 'nature-figure/SKILL.md': 'a'.repeat(40) } },
+      roster: ['nature-figure', 'anti-defensive-writing'],
+      installation: { installed: ['nature-figure'], missing: ['anti-defensive-writing'], complete: false },
+      config: { autoCheck: false, intervalHours: 6, targetDir: skills, mirror: '' },
+    }
+    await writeFile(join(home, 'dsh-nature-state.json'), JSON.stringify(legacy, null, 2))
+
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    // 读回来确认 load() 没把 sources 弄成 undefined
+    assert.ok(service.state.sources !== undefined, 'load() 后 sources 必须有值')
+
+    // 远端：两个源都有这两个技能，内容与本地一致
+    const files = {
+      'nature-figure/SKILL.md': 'a'.repeat(40),
+      'anti-defensive-writing/SKILL.md': 'b'.repeat(40),
+    }
+    service.fetchAllSources = async () => ({
+      files,
+      heads: { nature: 'n1'.padEnd(40, '0'), 'anti-defensive': 'd1'.padEnd(40, '0') },
+      perSource: {
+        nature: { headSha: 'n1'.padEnd(40, '0'), files: { 'nature-figure/SKILL.md': 'a'.repeat(40) } },
+        'anti-defensive': { headSha: 'd1'.padEnd(40, '0'), files: { 'anti-defensive-writing/SKILL.md': 'b'.repeat(40) } },
+      },
+      failures: [],
+    })
+
+    const checked = await service.check()
+    assert.equal(checked.changedSkills.length, 0,
+      '升级迁移不该报出任何变更，实际：' + JSON.stringify(checked.changedSkills.map((r) => r.name)))
+    assert.equal(checked.lastCheckStatus, 'upToDate', '状态应是 upToDate，实际 ' + checked.lastCheckStatus)
+    assert.equal(checked.updateAvailable, false, '不该点亮红点')
+
+    // 两个源都建立了基线
+    const nature = checked.sources.find((s) => s.id === 'nature')
+    const anti = checked.sources.find((s) => s.id === 'anti-defensive')
+    assert.equal(nature.baselineSha, 'n1'.padEnd(40, '0'), '主源基线应迁移/采纳')
+    assert.equal(anti.baselineSha, 'd1'.padEnd(40, '0'), '副源基线应被采纳')
+
+    // 落盘也要是干净的（重启后不该又变回误报）
+    const saved = JSON.parse(await readFile(join(home, 'dsh-nature-state.json'), 'utf8'))
+    assert.equal(saved.changedSkills.length, 0, '磁盘状态文件也不许留着误报')
+    assert.ok(saved.sources && saved.sources.nature, '磁盘状态文件必须写入 per-source 快照')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('迁移: 旧单源状态文件在 load() 阶段就完成迁移（不等 check）', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-loadmig-'))
+  try {
+    const head = 'd774add241c65e89ed17a4da573b472b0972fd42'
+    await writeFile(join(home, 'dsh-nature-state.json'), JSON.stringify({
+      version: 1,
+      headSha: head,
+      lastCheckedAt: '2026-11-04T22:57:42.890Z',
+      lastCheckStatus: 'upToDate', lastError: null, updateAvailable: false, changedSkills: [],
+      manifest: { headSha: head, files: { 'nature-figure/SKILL.md': 'a'.repeat(40) } },
+      roster: [], installation: { installed: [], missing: [], complete: false },
+      config: { autoCheck: false, intervalHours: 6, targetDir: join(home, 'skills'), mirror: '' },
+      // 没有 sources —— 旧版状态文件
+    }))
+
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+
+    // 关键：**不调 check、不发任何网络请求**，直接看内存状态
+    const primary = service.state.sources && service.state.sources.nature
+    assert.ok(primary, 'load() 后主源状态槽必须存在')
+    assert.equal(primary.headSha, head, '旧顶层 headSha 必须迁移给主源')
+    assert.deepEqual(Object.keys(primary.manifest.files), ['nature-figure/SKILL.md'],
+      '旧顶层文件清单必须迁移给主源，否则首次 check 会把全部技能误报成新增')
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
+
+test('迁移: 已有 per-source 基线时不被旧顶层 manifest 覆盖', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const mod = await import('../lib/index.js')
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-nomig-'))
+  try {
+    const oldHead = 'o'.repeat(40)
+    const newHead = 'n'.repeat(40)
+    await writeFile(join(home, 'dsh-nature-state.json'), JSON.stringify({
+      version: 1,
+      headSha: oldHead,
+      manifest: { headSha: oldHead, files: { 'nature-figure/OLD.md': 'a'.repeat(40) } },
+      sources: {
+        nature: { headSha: newHead, manifest: { headSha: newHead, files: { 'nature-figure/NEW.md': 'b'.repeat(40) } } },
+      },
+      roster: [], installation: { installed: [], missing: [], complete: false },
+      config: { autoCheck: false, intervalHours: 6, targetDir: join(home, 'skills'), mirror: '' },
+    }))
+
+    let service
+    mod.apply({ logger: { warn() {} }, provide(k, v) { service = v }, effect() {} }, { dshHome: home })
+    const primary = service.state.sources.nature
+    assert.equal(primary.headSha, newHead, '已有 per-source 基线时不能被旧顶层覆盖')
+    assert.deepEqual(Object.keys(primary.manifest.files), ['nature-figure/NEW.md'])
+  } finally {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+})
