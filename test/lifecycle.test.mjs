@@ -311,6 +311,37 @@ test('P1-5 重启后每源归属不退回内置清单（源行不报假技能数
   }
 })
 
+// ── 归属自愈：老状态文件（没有 sourceOf）也要让源行说得清 ──────────────────────
+test('归属自愈：老状态文件加载后源行有归属，不显示 0 个技能', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nature-life-legacy-'))
+  try {
+    const skills = join(home, 'skills')
+    // 磁盘上装好两个技能，状态文件是 1.3.0 之前写的（没有 sourceOf 字段）
+    for (const name of ['nature-figure', 'anti-defensive-writing']) {
+      await mkdir(join(skills, name), { recursive: true })
+      await writeFile(join(skills, name, 'SKILL.md'), SKILL_HEAD)
+    }
+    await writeFile(join(home, 'dsh-nature-state.json'), JSON.stringify({
+      version: 1,
+      headSha: null, lastCheckedAt: null, lastCheckStatus: 'never', lastError: null,
+      updateAvailable: false, changedSkills: [],
+      manifest: { headSha: null, files: {} },
+      installation: { installed: [], missing: [], complete: false },
+      config: { autoCheck: false, intervalHours: 6, targetDir: skills, mirror: '' },
+    }))
+
+    const service = await boot(home)
+    const status = await service.status()
+    for (const source of status.sources) {
+      assert.ok(source.skills.length > 0,
+        '老状态文件下 [' + source.id + '] 源行没有归属，会显示 0 个技能')
+      assert.equal(source.skillsKnown, true)
+    }
+  } finally {
+    await teardown(home)
+  }
+})
+
 // ── P1-6：远端版本必须反映远端真实 head ────────────────────────────────────────
 test('P1-6 check 后远端版本前进，基线版本原地不动', async () => {
   const { home, service, remote } = await setup()
